@@ -15,3 +15,6 @@ export { RestAdapterFactory } from "./rest/rest-adapter-factory.js";
 export { CypherAdapter } from "./cypher/cypher-adapter.js";
 export { CypherIdentifier } from "./cypher/cypher-identifier.js";
 export type { CypherRow, ICypherSession } from "./cypher/cypher-session.js";
+export { CypherAdapterFactory } from "./cypher/cypher-adapter-factory.js";
+export { CypherConnectionConfig, Neo4jCypherSession } from "./cypher/neo4j-cypher-session.js";
+export type { CypherConnection } from "./cypher/neo4j-cypher-session.js";
