@@ -28,6 +28,52 @@ class FakePool
     }
 }
 
+class ThrowingPool
+{
+    public constructor(private readonly error: Error)
+    {
+    }
+
+    public async query(): Promise<never>
+    {
+        throw this.error;
+    }
+
+    public AsPool(): Pool
+    {
+        return this as unknown as Pool;
+    }
+}
+
+class UndefinedTableError extends Error
+{
+    public readonly code = "42P01";
+}
+
+test("Query returns [] when the pool throws an undefined-table error", async () =>
+{
+    const session = new PgSqlSession(new ThrowingPool(new UndefinedTableError('relation "Nope" does not exist')).AsPool());
+    assert.deepEqual(await session.Query('select "id" from "Nope"', []), []);
+});
+
+test("Query returns [] for a pg-mem style code-less missing-relation error", async () =>
+{
+    const session = new PgSqlSession(new ThrowingPool(new Error('relation "Nope" does not exist')).AsPool());
+    assert.deepEqual(await session.Query("select 1", []), []);
+});
+
+test("Query still propagates any other error", async () =>
+{
+    const session = new PgSqlSession(new ThrowingPool(new Error("connection refused")).AsPool());
+    await assert.rejects(session.Query("select 1", []), /connection refused/);
+});
+
+test("Execute stays strict on an undefined-table error", async () =>
+{
+    const session = new PgSqlSession(new ThrowingPool(new UndefinedTableError('relation "Nope" does not exist')).AsPool());
+    await assert.rejects(session.Execute("delete from \"Nope\"", []), /does not exist/);
+});
+
 test("Query returns the driver rows", async () =>
 {
     const pool = new FakePool({ rows: [{ id: "c1" }], rowCount: 1 }, () => {});

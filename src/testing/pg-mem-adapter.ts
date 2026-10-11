@@ -4,54 +4,6 @@ import type { IDataSourceAdapter, ISqlSession, SqlRow } from "@pragmatic-tech-ai
 import { Pool } from "pg";
 import { PgSqlSession } from "../sql/pg-sql-session.js";
 
-/**
- * Test-only decorator: the conformance contract says an unknown source yields no records, but a real
- * SQL engine raises "relation does not exist". Production PgSqlSession stays strict (a missing table is
- * a real misconfiguration); the harness maps that one error to an empty result so the shared contract holds.
- */
-class MissingRelationTolerantSession implements ISqlSession
-{
-    private static readonly UndefinedTableCode = "42P01";
-    private static readonly MissingRelationPattern = /relation .* does not exist/i;
-
-    public constructor(private readonly inner: ISqlSession)
-    {
-    }
-
-    public async Query(sql: string, params: readonly unknown[]): Promise<readonly SqlRow[]>
-    {
-        try
-        {
-            return await this.inner.Query(sql, params);
-        }
-        catch (error)
-        {
-            if (MissingRelationTolerantSession.IsMissingRelation(error))
-            {
-                return [];
-            }
-            throw error;
-        }
-    }
-
-    public Execute(sql: string, params: readonly unknown[]): Promise<number>
-    {
-        return this.inner.Execute(sql, params);
-    }
-
-    public Dispose(): Promise<void>
-    {
-        return this.inner.Dispose();
-    }
-
-    private static IsMissingRelation(error: unknown): boolean
-    {
-        const e = error as { code?: string; message?: string };
-        return e.code === MissingRelationTolerantSession.UndefinedTableCode
-            || MissingRelationTolerantSession.MissingRelationPattern.test(e.message ?? "");
-    }
-}
-
 /** Builds pg-mem-backed SqlAdapters pre-seeded with Customer(id PRIMARY KEY, label) = c1/Acme. */
 export class PgMemAdapterHarness
 {
@@ -66,7 +18,7 @@ export class PgMemAdapterHarness
         const pool = new pg.Pool() as unknown as Pool;
         db.public.none(PgMemAdapterHarness.CreateTableSql);
         db.public.none(PgMemAdapterHarness.SeedSql);
-        return new SqlAdapter(new MissingRelationTolerantSession(new PgSqlSession(pool)));
+        return new SqlAdapter(new PgSqlSession(pool));
     }
 }
 
@@ -120,6 +72,6 @@ export class PgLiveHarness
     public static Make(connectionString: string): IDataSourceAdapter
     {
         const pool = new Pool({ connectionString });
-        return new SqlAdapter(new MissingRelationTolerantSession(new ResettingSession(new PgSqlSession(pool))));
+        return new SqlAdapter(new ResettingSession(new PgSqlSession(pool)));
     }
 }
