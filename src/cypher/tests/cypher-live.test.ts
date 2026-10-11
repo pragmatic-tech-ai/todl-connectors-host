@@ -39,38 +39,47 @@ class SeedingCypherSession implements ICypherSession
 
 class LiveNeo4j
 {
-    public static readonly UriVar = "CONNECTORS_LIVE_NEO4J";
-    public static readonly UserVar = "CONNECTORS_LIVE_NEO4J_USER";
-    public static readonly PasswordVar = "CONNECTORS_LIVE_NEO4J_PASSWORD";
-    public static readonly SkipName = "Cypher live conformance (CONNECTORS_LIVE_NEO4J unset)";
-    public static readonly SuiteName = "CypherAdapter (live neo4j)";
+    private static readonly UriVar = "CONNECTORS_LIVE_NEO4J";
+    private static readonly UserVar = "CONNECTORS_LIVE_NEO4J_USER";
+    private static readonly PasswordVar = "CONNECTORS_LIVE_NEO4J_PASSWORD";
+    private static readonly SkipName = "Cypher live conformance (CONNECTORS_LIVE_NEO4J unset)";
+    private static readonly SuiteName = "CypherAdapter (live neo4j)";
 
-    public static readonly Opened: CypherAdapter[] = [];
+    private static readonly opened: CypherAdapter[] = [];
 
-    public static Make(uri: string): IDataSourceAdapter
+    /** Registers the live contract when enabled (human-run against provisioned neo4j), else one skipped test. */
+    public static Register(): void
+    {
+        const uri = LiveNeo4j.Uri();
+        if (uri !== "")
+        {
+            describeDataSourceAdapter(LiveNeo4j.SuiteName, () => LiveNeo4j.Make(uri));
+            after(async () =>
+            {
+                await Promise.all(LiveNeo4j.opened.map(adapter => adapter.Dispose()));
+            });
+        }
+        else
+        {
+            test(LiveNeo4j.SkipName, { skip: true }, () => {});
+        }
+    }
+
+    private static Uri(): string
+    {
+        return process.env[LiveNeo4j.UriVar] ?? "";
+    }
+
+    private static Make(uri: string): IDataSourceAdapter
     {
         const config: Record<string, string> = { uri };
         const user = process.env[LiveNeo4j.UserVar];
-        if (user !== undefined && user !== "") config["user"] = user;
+        if (user !== undefined && user !== "") config[CypherConnectionConfig.UserKey] = user;
         const session = Neo4jCypherSession.Connect(CypherConnectionConfig.From(config, process.env[LiveNeo4j.PasswordVar]));
         const adapter = new CypherAdapter(new SeedingCypherSession(session));
-        LiveNeo4j.Opened.push(adapter);
+        LiveNeo4j.opened.push(adapter);
         return adapter;
     }
 }
 
-const liveUri = process.env[LiveNeo4j.UriVar] ?? "";
-
-if (liveUri !== "")
-{
-    // Human-run against provisioned neo4j; set CONNECTORS_LIVE_NEO4J (+ _USER / _PASSWORD).
-    describeDataSourceAdapter(LiveNeo4j.SuiteName, () => LiveNeo4j.Make(liveUri));
-    after(async () =>
-    {
-        await Promise.all(LiveNeo4j.Opened.map(adapter => adapter.Dispose()));
-    });
-}
-else
-{
-    test(LiveNeo4j.SkipName, { skip: true }, () => {});
-}
+LiveNeo4j.Register();

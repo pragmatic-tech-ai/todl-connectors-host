@@ -14,7 +14,7 @@ export interface CypherConnection
 export class CypherConnectionConfig
 {
     private static readonly UriKey = "uri";
-    private static readonly UserKey = "user";
+    public static readonly UserKey = "user";
     private static readonly DatabaseKey = "database";
     private static readonly DefaultUser = "neo4j";
     private static readonly MissingUriMessage = "cypher connector config requires 'uri'";
@@ -40,6 +40,7 @@ export class Neo4jCypherSession implements ICypherSession
 
     public static Connect(connection: CypherConnection): Neo4jCypherSession
     {
+        // No secret => empty password: intentionally targets an auth-disabled server.
         const auth = neo4j.auth.basic(connection.user, connection.password ?? "");
         return new Neo4jCypherSession(neo4j.driver(connection.uri, auth), connection.database);
     }
@@ -50,6 +51,8 @@ export class Neo4jCypherSession implements ICypherSession
         try
         {
             const result = await session.run(cypher, params);
+            // neo4j-native values (Integer, temporal, ...) pass through ExternalQuery.Coerce, which stringifies
+            // non-scalars (Integer -> decimal string), like the SQL adapter's numeric->string; richer typing is deferred.
             return result.records.map(record => Object.fromEntries(record.keys.map(k => [k, record.get(k)])) as CypherRow);
         }
         finally
