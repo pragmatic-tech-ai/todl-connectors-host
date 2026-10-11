@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@pragmatic-tech-ai/todl": "file:../TODL",
+    "@pragmatic-tech-ai/todl-runtime": "file:../todl-runtime",
     "pg": "^8.13.0",
     "neo4j-driver": "^5.27.0",
     "mongodb": "^6.12.0"

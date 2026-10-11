@@ -24,3 +24,5 @@ export type { IDocumentSession } from "./document/document-session.js";
 export { DocumentAdapterFactory } from "./document/document-adapter-factory.js";
 export { DocumentConnectionConfig, MongoDocumentSession } from "./document/mongo-document-session.js";
 export type { DocumentConnection } from "./document/mongo-document-session.js";
+export { ConnectorsHost } from "./connectors-host.js";
+export type { ConnectorsHostOptions } from "./connectors-host.js";
