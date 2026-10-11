@@ -7,8 +7,9 @@ import { PgSqlSession } from "../sql/pg-sql-session.js";
 /** Builds pg-mem-backed SqlAdapters pre-seeded with Customer(id PRIMARY KEY, label) = c1/Acme. */
 export class PgMemAdapterHarness
 {
-    private static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text)';
-    private static readonly SeedSql = `INSERT INTO "Customer" (id, label) VALUES ('c1', 'Acme')`;
+    /** Single home of the fixture table shape (id MUST be PRIMARY KEY for the engine's ON CONFLICT upsert). */
+    public static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text)';
+    public static readonly SeedSql = `INSERT INTO "Customer" (id, label) VALUES ('c1', 'Acme')`;
 
     /** A fresh, isolated in-process database per call. */
     public static Make(): IDataSourceAdapter
@@ -57,8 +58,8 @@ class ResettingSession implements ISqlSession
     private async Reset(): Promise<void>
     {
         await this.inner.Execute(PgLiveHarness.DropTableSql, []);
-        await this.inner.Execute(PgLiveHarness.CreateTableSql, []);
-        await this.inner.Execute(PgLiveHarness.SeedSql, []);
+        await this.inner.Execute(PgMemAdapterHarness.CreateTableSql, []);
+        await this.inner.Execute(PgMemAdapterHarness.SeedSql, []);
     }
 }
 
@@ -66,12 +67,24 @@ class ResettingSession implements ISqlSession
 export class PgLiveHarness
 {
     public static readonly DropTableSql = 'DROP TABLE IF EXISTS "Customer"';
-    public static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text)';
-    public static readonly SeedSql = `INSERT INTO "Customer" (id, label) VALUES ('c1', 'Acme')`;
+
+    private static readonly Opened: IDataSourceAdapter[] = [];
 
     public static Make(connectionString: string): IDataSourceAdapter
     {
         const pool = new Pool({ connectionString });
-        return new SqlAdapter(new ResettingSession(new PgSqlSession(pool)));
+        const adapter = new SqlAdapter(new ResettingSession(new PgSqlSession(pool)));
+        PgLiveHarness.Opened.push(adapter);
+        return adapter;
+    }
+
+    /** Ends every pool opened by Make so a live run does not leak connections until idle timeout. */
+    public static async DisposeAll(): Promise<void>
+    {
+        const adapters = PgLiveHarness.Opened.splice(0);
+        for (const adapter of adapters)
+        {
+            await adapter.Dispose();
+        }
     }
 }

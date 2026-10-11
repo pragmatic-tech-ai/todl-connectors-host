@@ -62,6 +62,17 @@ test("Query returns [] for a pg-mem style code-less missing-relation error", asy
     assert.deepEqual(await session.Query("select 1", []), []);
 });
 
+class OtherCodeError extends Error
+{
+    public readonly code = "42501";
+}
+
+test("Query does not remap a different SQLSTATE even if the message looks like a missing relation", async () =>
+{
+    const session = new PgSqlSession(new ThrowingPool(new OtherCodeError('relation "Nope" does not exist')).AsPool());
+    await assert.rejects(session.Query("select 1", []), /does not exist/);
+});
+
 test("Query still propagates any other error", async () =>
 {
     const session = new PgSqlSession(new ThrowingPool(new Error("connection refused")).AsPool());

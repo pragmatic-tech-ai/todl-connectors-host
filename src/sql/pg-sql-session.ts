@@ -9,8 +9,10 @@ export class PgSqlSession implements ISqlSession
     /**
      * pg-mem sets NO `code` for a missing relation: it throws a RelationNotFound error whose message is
      * `relation "<name>" does not exist`. Real Postgres uses the same message wording.
+     * pg-mem appends multi-line hints after the first line, so only the first line is matched.
      */
-    private static readonly MissingRelationPattern = /^relation ".*" does not exist/;
+    private static readonly LineBreak = "\n";
+    private static readonly MissingRelationPattern = /^relation "[^"]+" does not exist$/;
 
     public constructor(private readonly pool: Pool)
     {
@@ -52,7 +54,13 @@ export class PgSqlSession implements ISqlSession
         {
             return false;
         }
-        return e.code === PgSqlSession.UndefinedTableCode
-            || (typeof e.message === "string" && PgSqlSession.MissingRelationPattern.test(e.message));
+        if (e.code === PgSqlSession.UndefinedTableCode)
+        {
+            return true;
+        }
+        // Message fallback only for code-less errors (pg-mem); a different SQLSTATE is never remapped.
+        return e.code === undefined
+            && typeof e.message === "string"
+            && PgSqlSession.MissingRelationPattern.test(e.message.split(PgSqlSession.LineBreak)[0]!);
     }
 }
