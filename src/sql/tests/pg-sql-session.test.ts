@@ -11,7 +11,7 @@ class FakePool
     {
     }
 
-    public async query(sql: string, params: readonly unknown[])
+    public async query(sql: string, params: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>
     {
         this.calls.push({ sql, params });
         return this.result;
@@ -35,12 +35,16 @@ test("Query returns the driver rows", async () =>
     assert.deepEqual(rows, [{ id: "c1" }]);
 });
 
-test("Execute returns the affected-row count, defaulting null to 0", async () =>
+test("Execute defaults a null rowCount to 0", async () =>
 {
     const session = new PgSqlSession(new FakePool({ rows: [], rowCount: null }, () => {}).AsPool());
     assert.equal(await session.Execute("delete from t", []), 0);
-    const session2 = new PgSqlSession(new FakePool({ rows: [], rowCount: 3 }, () => {}).AsPool());
-    assert.equal(await session2.Execute("update t set x=1", []), 3);
+});
+
+test("Execute returns the affected-row count", async () =>
+{
+    const session = new PgSqlSession(new FakePool({ rows: [], rowCount: 3 }, () => {}).AsPool());
+    assert.equal(await session.Execute("update t set x=1", []), 3);
 });
 
 test("Dispose ends the pool", async () =>
