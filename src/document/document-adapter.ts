@@ -2,6 +2,7 @@ import { WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { ExternalRecord, IDataSourceAdapter, QueryRequest, WriteBatch, WriteConflict, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { MongoFilter } from "./mongo-filter.js";
+import { DocumentIdentifier } from "./document-identifier.js";
 import type { IDocumentSession } from "./document-session.js";
 
 /** Document adapter: Find to read (Where re-applied in-adapter), Upsert/Delete to write. */
@@ -50,11 +51,16 @@ export class DocumentAdapter implements IDataSourceAdapter
 
     private async ApplyUpsert(batch: WriteBatch, op: WriteOperation): Promise<boolean>
     {
+        for (const field of Object.keys(op.Fields))
+        {
+            DocumentIdentifier.Validate(field);
+        }
+        // Guard keys off batch.VersionField, but ReadVersion reads the CONNECTION-configured versionField (its signature carries no field name); if they differ, the connection's field is what is actually read.
         if (batch.VersionField !== undefined && this.session.ReadVersion !== undefined)
         {
             const stored = (await this.session.ReadVersion(batch.Source, batch.IdKey, op.Key)) ?? null;
-            // A not-yet-present doc reads null and is always writable.
-            // A present stored version with an absent expected op.Version (existing doc the caller did not version) is a conflict (fail-safe).
+            // A stored null (doc absent OR present-but-unversioned) is treated as writable (fail-open); only a present, concrete
+            // stored version that differs from op.Version is a conflict. Documented v1 best-effort optimistic-concurrency limitation.
             if (stored !== null && stored !== (op.Version ?? null))
             {
                 return false;

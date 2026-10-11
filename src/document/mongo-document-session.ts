@@ -1,6 +1,7 @@
 import { MongoClient } from "mongodb";
 import type { MongoClientOptions } from "mongodb";
 import type { IDocumentSession } from "./document-session.js";
+import { DocumentIdentifier } from "./document-identifier.js";
 
 /** Parsed Mongo connection. */
 export interface DocumentConnection
@@ -53,23 +54,35 @@ export class MongoDocumentSession implements IDocumentSession
 
     public async Find(collection: string, filter: Record<string, unknown>): Promise<readonly Record<string, unknown>[]>
     {
+        DocumentIdentifier.Validate(collection);
         return this.client.db(this.database).collection(collection).find(filter, { projection: { _id: 0 } }).toArray() as unknown as Record<string, unknown>[];
     }
 
     public async Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>
     {
+        DocumentIdentifier.Validate(collection);
+        DocumentIdentifier.Validate(idField);
         await this.client.db(this.database).collection(collection).replaceOne({ [idField]: key }, doc, { upsert: true });
     }
 
     public async Delete(collection: string, idField: string, key: unknown): Promise<boolean>
     {
+        DocumentIdentifier.Validate(collection);
+        DocumentIdentifier.Validate(idField);
         const result = await this.client.db(this.database).collection(collection).deleteOne({ [idField]: key });
         return result.deletedCount > 0;
     }
 
-    /** Enabling optimistic versioning on a document source requires configuring the versionField key; without it, writes are not version-guarded. */
+    /**
+     * Enabling optimistic versioning on a document source requires configuring the versionField key; without it, writes are not version-guarded.
+     * Returns null in THREE cases: versionField unconfigured, doc absent, AND doc present but its version field absent/null. The caller
+     * therefore cannot distinguish a brand-new doc from a pre-existing unversioned doc (both are treated as writable). This is deliberate
+     * v1 best-effort behavior (consistent with the non-atomic read-then-write window; transactions are deferred, spec section 9).
+     */
     public async ReadVersion(collection: string, idField: string, key: unknown): Promise<unknown>
     {
+        DocumentIdentifier.Validate(collection);
+        DocumentIdentifier.Validate(idField);
         const doc = await this.client.db(this.database).collection(collection).findOne({ [idField]: key });
         if (doc === null || this.versionField === undefined) return null;
         return doc[this.versionField] ?? null;

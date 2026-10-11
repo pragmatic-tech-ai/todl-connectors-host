@@ -1,5 +1,6 @@
 import { QueryCompareOp } from "@pragmatic-tech-ai/todl";
 import type { QueryComparison } from "@pragmatic-tech-ai/todl";
+import { DocumentIdentifier } from "./document-identifier.js";
 
 /**
  * Best-effort Mongo filter from push-down comparisons. NOTE: Mongo's `$ne: null` does NOT match
@@ -16,7 +17,7 @@ export class MongoFilter
         for (const c of comparisons)
         {
             // Two comparisons on the same field overwrite each other here; fine, as this is only a best-effort hint and ExternalQuery is authoritative.
-            filter[c.Field] = c.Op === QueryCompareOp.Neq ? { [MongoFilter.NotEqualOperator]: c.Value } : c.Value;
+            filter[DocumentIdentifier.Validate(c.Field)] = c.Op === QueryCompareOp.Neq ? { [MongoFilter.NotEqualOperator]: c.Value } : c.Value;
         }
         return filter;
     }
