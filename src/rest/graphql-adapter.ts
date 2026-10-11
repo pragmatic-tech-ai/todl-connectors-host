@@ -3,7 +3,7 @@ import type { ExternalRecord, QueryRequest, WriteBatch, WriteConflict, WriteOper
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { RestHttpMethod } from "./rest-http-client.js";
-import type { IRestHttpClient } from "./rest-http-client.js";
+import type { IRestHttpClient, RestResponse } from "./rest-http-client.js";
 
 /** Parsed GraphQL connection. One adapter instance serves exactly one `source` via `queryField`. */
 export interface GraphQlConnection
@@ -51,11 +51,31 @@ export class GraphQlConnectionConfig
     }
 }
 
+/** Validates identifiers interpolated into a GraphQL document (GraphQL name rules). */
+export class GraphQlName
+{
+    private static readonly Pattern = /^[_A-Za-z][_0-9A-Za-z]*$/;
+    private static readonly InvalidMessage = "graphql name is not a valid identifier";
+
+    public static Validate(name: string): string
+    {
+        if (typeof name !== "string" || !GraphQlName.Pattern.test(name))
+        {
+            throw new Error(GraphQlName.InvalidMessage);
+        }
+        return name;
+    }
+}
+
 /** GraphQL adapter: read via a configured query field, write via configured mutations. Where re-applied in-adapter. */
 export class GraphQlAdapter implements IDataSourceAdapter
 {
     private static readonly WriteNotConfiguredReason = "graphql write not configured";
     private static readonly DataKey = "data";
+    private static readonly ErrorsKey = "errors";
+    private static readonly RequestFailedMessage = "graphql request failed";
+    private static readonly SuccessMin = 200;
+    private static readonly SuccessMax = 299;
     private static readonly FieldSeparator = " ";
     private static readonly QueryPrefix = "query{ ";
     private static readonly SelectionOpen = "{ ";
@@ -77,9 +97,10 @@ export class GraphQlAdapter implements IDataSourceAdapter
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
         if (request.Source !== this.connection.source) return [];
-        const document = this.QueryDocument(request.Fields);
+        const document = this.QueryDocument(GraphQlAdapter.Selection(request));
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
             { [GraphQlAdapter.QueryKey]: document });
+        GraphQlAdapter.EnsureOk(response);
         const data = (response.Body as Record<string, unknown> | undefined)?.[GraphQlAdapter.DataKey] as Record<string, unknown> | undefined;
         const list = data?.[this.connection.queryField];
         const records = Array.isArray(list) ? list as Record<string, unknown>[] : [];
@@ -107,23 +128,46 @@ export class GraphQlAdapter implements IDataSourceAdapter
         if (op.Kind === WriteOperationKind.Delete)
         {
             if (this.connection.deleteMutation === undefined) return false;
-            const document = GraphQlAdapter.DeletePrefix + this.connection.deleteMutation + GraphQlAdapter.DeleteArgs;
-            await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
+            // Assumes a schema convention: id is an ID! argument (richer/configurable write types are a documented deferral).
+            const document = GraphQlAdapter.DeletePrefix + GraphQlName.Validate(this.connection.deleteMutation) + GraphQlAdapter.DeleteArgs;
+            const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
                 { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.IdVariable]: op.Key } });
+            GraphQlAdapter.EnsureOk(response);
             return true;
         }
         if (this.connection.upsertMutation === undefined) return false;
-        const document = GraphQlAdapter.UpsertPrefix + this.connection.upsertMutation + GraphQlAdapter.UpsertArgs
-            + batch.IdKey + GraphQlAdapter.UpsertSuffix;
+        // Assumes a schema convention: a JSON! input scalar (richer/configurable write types are a documented deferral).
+        const document = GraphQlAdapter.UpsertPrefix + GraphQlName.Validate(this.connection.upsertMutation) + GraphQlAdapter.UpsertArgs
+            + GraphQlName.Validate(batch.IdKey) + GraphQlAdapter.UpsertSuffix;
         const input = { ...op.Fields, [batch.IdKey]: op.Key };
-        await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
+        const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
             { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.InputVariable]: input } });
+        GraphQlAdapter.EnsureOk(response);
         return true;
     }
 
     private QueryDocument(fields: readonly string[]): string
     {
-        return GraphQlAdapter.QueryPrefix + this.connection.queryField + GraphQlAdapter.SelectionOpen
-            + fields.join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.SelectionClose + GraphQlAdapter.SelectionClose;
+        return GraphQlAdapter.QueryPrefix + GraphQlName.Validate(this.connection.queryField) + GraphQlAdapter.SelectionOpen
+            + fields.map(f => GraphQlName.Validate(f)).join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.SelectionClose + GraphQlAdapter.SelectionClose;
+    }
+
+    /** Union of projected fields and Where fields, deduped, so Where can be re-applied in-adapter. */
+    private static Selection(request: QueryRequest): string[]
+    {
+        const names = new Set<string>(request.Fields);
+        for (const term of request.Where?.All ?? []) names.add(term.Field);
+        return [...names];
+    }
+
+    /** Throws a secret-free error for a non-2xx status or a GraphQL errors array. */
+    private static EnsureOk(response: RestResponse): void
+    {
+        const errors = (response.Body as { errors?: unknown } | undefined)?.[GraphQlAdapter.ErrorsKey];
+        const statusOk = response.Status >= GraphQlAdapter.SuccessMin && response.Status <= GraphQlAdapter.SuccessMax;
+        if (!statusOk || (Array.isArray(errors) && errors.length > 0))
+        {
+            throw new Error(GraphQlAdapter.RequestFailedMessage);
+        }
     }
 }
