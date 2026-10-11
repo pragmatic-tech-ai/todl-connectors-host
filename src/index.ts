@@ -18,3 +18,6 @@ export type { CypherRow, ICypherSession } from "./cypher/cypher-session.js";
 export { CypherAdapterFactory } from "./cypher/cypher-adapter-factory.js";
 export { CypherConnectionConfig, Neo4jCypherSession } from "./cypher/neo4j-cypher-session.js";
 export type { CypherConnection } from "./cypher/neo4j-cypher-session.js";
+export { DocumentAdapter } from "./document/document-adapter.js";
+export { MongoFilter } from "./document/mongo-filter.js";
+export type { IDocumentSession } from "./document/document-session.js";
