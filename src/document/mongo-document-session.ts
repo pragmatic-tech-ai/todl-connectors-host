@@ -37,13 +37,19 @@ export class DocumentConnectionConfig
 /** IDocumentSession over a mongodb MongoClient. */
 export class MongoDocumentSession implements IDocumentSession
 {
-    public constructor(private readonly client: MongoClient, private readonly database: string, private readonly versionField?: string)
+    private static readonly AuthMissingUserMessage = "mongo auth requires a 'user' config key when a secret is supplied";
+
+    public constructor(private readonly client: MongoClient,private readonly database: string, private readonly versionField?: string)
     {
     }
 
     /** Builds the client lazily (no network until first use). The secret goes only into MongoClientOptions.auth. */
     public static Connect(connection: DocumentConnection, secret?: string): MongoDocumentSession
     {
+        if (secret !== undefined && connection.user === undefined)
+        {
+            throw new Error(MongoDocumentSession.AuthMissingUserMessage);
+        }
         const options: MongoClientOptions = {};
         if (secret !== undefined && connection.user !== undefined)
         {

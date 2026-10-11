@@ -16,6 +16,7 @@ export class DocumentAdapter implements IDataSourceAdapter
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
+        DocumentIdentifier.Validate(request.Source);
         const filter = MongoFilter.From(request.Where?.All ?? []);
         const docs = await this.session.Find(request.Source, filter);
         return ExternalQuery.Apply(docs, request);
@@ -23,6 +24,8 @@ export class DocumentAdapter implements IDataSourceAdapter
 
     public async Apply(batch: WriteBatch): Promise<WriteResult>
     {
+        DocumentIdentifier.Validate(batch.Source);
+        DocumentIdentifier.Validate(batch.IdKey);
         let applied = 0;
         const conflicts: WriteConflict[] = [];
         for (const op of batch.Operations)

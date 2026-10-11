@@ -64,3 +64,14 @@ test("a query filtering on an operator-prefixed or dotted field is rejected", as
             Where: { All: [{ Field: field, Op: QueryCompareOp.Eq, Value: "x" }] } }));
     }
 });
+
+test("the adapter itself rejects an invalid Source on Query and an invalid IdKey or Source on Apply", async () =>
+{
+    const adapter = new DocumentAdapter(new FakeDocumentSession());
+    for (const source of [DocumentFixture.OperatorKey, DocumentFixture.DottedKey])
+    {
+        await assert.rejects(adapter.Query({ Source: source, Fields: [DocumentFixture.IdField] }));
+        await assert.rejects(adapter.Apply({ Source: source, IdKey: DocumentFixture.IdField, Operations: [] }));
+    }
+    await assert.rejects(adapter.Apply({ Source: DocumentFixture.Collection, IdKey: DocumentFixture.OperatorKey, Operations: [] }));
+});
