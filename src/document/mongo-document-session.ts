@@ -39,7 +39,7 @@ export class MongoDocumentSession implements IDocumentSession
 {
     private static readonly AuthMissingUserMessage = "mongo auth requires a 'user' config key when a secret is supplied";
 
-    public constructor(private readonly client: MongoClient,private readonly database: string, private readonly versionField?: string)
+    public constructor(private readonly client: MongoClient, private readonly database: string, private readonly versionField?: string)
     {
     }
 
