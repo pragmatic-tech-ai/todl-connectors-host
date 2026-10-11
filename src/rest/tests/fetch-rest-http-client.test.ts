@@ -4,6 +4,26 @@ import { FetchRestHttpClient, RestHttpMethod } from "../rest-http-client.js";
 
 class FakeFetch
 {
+    public static Calls = 0;
+
+    public static CreateNonJson(status: number): typeof fetch
+    {
+        return (async () =>
+        {
+            return { ok: false, status, json: async () => { throw new SyntaxError("not json"); } } as unknown as Response;
+        }) as unknown as typeof fetch;
+    }
+
+    public static CreateCounting(status: number, body: unknown): typeof fetch
+    {
+        const inner = FakeFetch.Create(status, body);
+        return (async (url: string | URL, init?: RequestInit) =>
+        {
+            FakeFetch.Calls++;
+            return inner(url, init);
+        }) as unknown as typeof fetch;
+    }
+
     public static Create(status: number, body: unknown): typeof fetch
     {
         return (async (url: string | URL) =>
@@ -48,5 +68,27 @@ test("allows plain http to localhost", async () =>
 {
     const client = new FetchRestHttpClient({ fetch: FakeFetch.Create(200, []) });
     const json = await client.GetJson("http://localhost:3000/Customer", {});
+    assert.deepEqual(json, []);
+});
+
+test("Send refuses plain http to a non-localhost host without calling fetch", async () =>
+{
+    FakeFetch.Calls = 0;
+    const client = new FetchRestHttpClient({ fetch: FakeFetch.CreateCounting(200, {}) });
+    await assert.rejects(() => client.Send(RestHttpMethod.Put, "http://api.example/x", {}, { label: "x" }), /https/i);
+    assert.equal(FakeFetch.Calls, 0);
+});
+
+test("Send resolves with undefined Body for a non-JSON response", async () =>
+{
+    const client = new FetchRestHttpClient({ fetch: FakeFetch.CreateNonJson(502) });
+    const res = await client.Send(RestHttpMethod.Post, "https://api.example/x", {}, { a: 1 });
+    assert.deepEqual(res, { Status: 502, Body: undefined });
+});
+
+test("allows plain http to 127.0.0.1", async () =>
+{
+    const client = new FetchRestHttpClient({ fetch: FakeFetch.Create(200, []) });
+    const json = await client.GetJson("http://127.0.0.1:5432/x", {});
     assert.deepEqual(json, []);
 });
