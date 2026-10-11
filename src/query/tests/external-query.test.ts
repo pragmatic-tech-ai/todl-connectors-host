@@ -43,4 +43,21 @@ test("a null operand excludes every row for both operators", () =>
     const out = ExternalQuery.Apply(rows,
         { Source: "Customer", Fields: ["id"], Where: { All: [{ Field: "label", Op: QueryCompareOp.Eq, Value: null }] } });
     assert.deepEqual(out, []);
+    const neq = ExternalQuery.Apply(rows,
+        { Source: "Customer", Fields: ["id"], Where: { All: [{ Field: "label", Op: QueryCompareOp.Neq, Value: null }] } });
+    assert.deepEqual(neq, []);
+});
+
+test("an absent field is omitted from the projection, not set to null", () =>
+{
+    const result = ExternalQuery.Apply(rows, { Source: "Customer", Fields: ["id", "missing"] });
+    assert.equal("missing" in result[0], false);
+    assert.deepEqual(result[0], { id: "c1" });
+});
+
+test("non-scalar values are coerced with String(value)", () =>
+{
+    const when = new Date(0);
+    const out = ExternalQuery.Apply([{ id: "d1", when, big: 10n }], { Source: "Customer", Fields: ["when", "big"] });
+    assert.deepEqual(out, [{ when: String(when), big: "10" }]);
 });
