@@ -8,7 +8,7 @@ export class CypherIdentifier
 
     public static Validate(name: string): string
     {
-        if (CypherIdentifier.ControlChars.test(name))
+        if (name.length === 0 || CypherIdentifier.ControlChars.test(name))
         {
             throw new Error(CypherIdentifier.InvalidMessage);
         }

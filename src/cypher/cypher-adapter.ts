@@ -7,17 +7,28 @@ import type { ICypherSession } from "./cypher-session.js";
 /** Graph adapter: MATCH to read (Where re-applied in-adapter), MERGE/DETACH DELETE to write. */
 export class CypherAdapter implements IDataSourceAdapter
 {
-    private static readonly NodeVar = "n";
-    private static readonly PropsAlias = "props";
-    private static readonly VersionAlias = "ver";
-    private static readonly KeyParam = "key";
-    private static readonly FieldsParam = "fields";
+    public static readonly NodeVar = "n";
+    public static readonly PropsAlias = "props";
+    public static readonly VersionAlias = "ver";
+    public static readonly KeyParam = "key";
+    public static readonly FieldsParam = "fields";
+    public static readonly Match = "MATCH";
+    public static readonly Merge = "MERGE";
+    public static readonly SetClause = "SET";
+    public static readonly Return = "RETURN";
+    public static readonly DetachDelete = "DETACH DELETE";
+    public static readonly PropertiesFn = "properties";
+    public static readonly AsKeyword = "AS";
+    public static readonly ParamPrefix = "$";
+    public static readonly OpenParen = "(";
+    public static readonly CloseParen = ")";
+    public static readonly OpenBrace = "{";
+    public static readonly CloseBrace = "}";
+    public static readonly Colon = ":";
+    public static readonly Space = " ";
+    public static readonly Dot = ".";
+    public static readonly MergeAssign = "+=";
     private static readonly VersionConflictReason = "version mismatch";
-    private static readonly Match = "MATCH";
-    private static readonly Merge = "MERGE";
-    private static readonly SetClause = "SET";
-    private static readonly Return = "RETURN";
-    private static readonly DetachDelete = "DETACH DELETE";
 
     public constructor(private readonly session: ICypherSession)
     {
@@ -26,8 +37,10 @@ export class CypherAdapter implements IDataSourceAdapter
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
         const v = CypherAdapter.NodeVar;
-        const cypher = `${CypherAdapter.Match} (${v}:${CypherIdentifier.Quote(request.Source)}) `
-            + `${CypherAdapter.Return} properties(${v}) AS ${CypherAdapter.PropsAlias}`;
+        const label = CypherIdentifier.Quote(request.Source);
+        const cypher = [CypherAdapter.Match, `${CypherAdapter.OpenParen}${v}${CypherAdapter.Colon}${label}${CypherAdapter.CloseParen}`,
+            CypherAdapter.Return, `${CypherAdapter.PropertiesFn}${CypherAdapter.OpenParen}${v}${CypherAdapter.CloseParen}`,
+            CypherAdapter.AsKeyword, CypherAdapter.PropsAlias].join(CypherAdapter.Space);
         const rows = await this.session.Run(cypher, {});
         const records = rows.map(r => (r[CypherAdapter.PropsAlias] ?? {}) as Record<string, unknown>);
         return ExternalQuery.Apply(records, request);
@@ -65,7 +78,9 @@ export class CypherAdapter implements IDataSourceAdapter
     {
         const label = CypherIdentifier.Quote(batch.Source);
         const idKey = CypherIdentifier.Quote(batch.IdKey);
-        return `(${CypherAdapter.NodeVar}:${label} {${idKey}: $${CypherAdapter.KeyParam}})`;
+        const param = `${CypherAdapter.ParamPrefix}${CypherAdapter.KeyParam}`;
+        return `${CypherAdapter.OpenParen}${CypherAdapter.NodeVar}${CypherAdapter.Colon}${label}${CypherAdapter.Space}`
+            + `${CypherAdapter.OpenBrace}${idKey}${CypherAdapter.Colon}${CypherAdapter.Space}${param}${CypherAdapter.CloseBrace}${CypherAdapter.CloseParen}`;
     }
 
     private async ApplyUpsert(batch: WriteBatch, op: WriteOperation): Promise<boolean>
@@ -74,8 +89,8 @@ export class CypherAdapter implements IDataSourceAdapter
         {
             return false;
         }
-        const cypher = `${CypherAdapter.Merge} ${this.IdPattern(batch)} `
-            + `${CypherAdapter.SetClause} ${CypherAdapter.NodeVar} += $${CypherAdapter.FieldsParam}`;
+        const cypher = [CypherAdapter.Merge, this.IdPattern(batch), CypherAdapter.SetClause, CypherAdapter.NodeVar,
+            CypherAdapter.MergeAssign, `${CypherAdapter.ParamPrefix}${CypherAdapter.FieldsParam}`].join(CypherAdapter.Space);
         const fields: Record<string, unknown> = { ...op.Fields, [batch.IdKey]: op.Key };
         await this.session.Run(cypher, { [CypherAdapter.KeyParam]: op.Key, [CypherAdapter.FieldsParam]: fields });
         return true;
@@ -84,8 +99,8 @@ export class CypherAdapter implements IDataSourceAdapter
     private async VersionMatches(batch: WriteBatch, op: WriteOperation): Promise<boolean>
     {
         const versionField = CypherIdentifier.Quote(batch.VersionField!);
-        const cypher = `${CypherAdapter.Match} ${this.IdPattern(batch)} `
-            + `${CypherAdapter.Return} ${CypherAdapter.NodeVar}.${versionField} AS ${CypherAdapter.VersionAlias}`;
+        const cypher = [CypherAdapter.Match, this.IdPattern(batch), CypherAdapter.Return,
+            `${CypherAdapter.NodeVar}${CypherAdapter.Dot}${versionField}`, CypherAdapter.AsKeyword, CypherAdapter.VersionAlias].join(CypherAdapter.Space);
         const rows = await this.session.Run(cypher, { [CypherAdapter.KeyParam]: op.Key });
         if (rows.length === 0)
         {
@@ -97,8 +112,7 @@ export class CypherAdapter implements IDataSourceAdapter
 
     private async Delete(batch: WriteBatch, op: WriteOperation): Promise<void>
     {
-        const cypher = `${CypherAdapter.Match} ${this.IdPattern(batch)} `
-            + `${CypherAdapter.DetachDelete} ${CypherAdapter.NodeVar}`;
+        const cypher = [CypherAdapter.Match, this.IdPattern(batch), CypherAdapter.DetachDelete, CypherAdapter.NodeVar].join(CypherAdapter.Space);
         await this.session.Run(cypher, { [CypherAdapter.KeyParam]: op.Key });
     }
 }

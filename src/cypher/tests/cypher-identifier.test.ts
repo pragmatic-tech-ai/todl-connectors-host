@@ -23,3 +23,9 @@ test("Validate rejects control characters", () =>
     assert.throws(() => CypherIdentifier.Validate(IdentifierFixture.Bad));
     assert.equal(CypherIdentifier.Validate(IdentifierFixture.Ok), IdentifierFixture.Ok);
 });
+
+test("Validate and Quote reject an empty name", () =>
+{
+    assert.throws(() => CypherIdentifier.Validate(""));
+    assert.throws(() => CypherIdentifier.Quote(""));
+});

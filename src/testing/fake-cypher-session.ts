@@ -1,19 +1,27 @@
+import { CypherAdapter } from "../cypher/cypher-adapter.js";
 import type { CypherRow, ICypherSession } from "../cypher/cypher-session.js";
 
-/** In-memory graph honoring the CypherAdapter's MATCH/MERGE/DETACH DELETE statements. */
+/** One statement the fake received, for assertions. */
+export interface RecordedStatement
+{
+    readonly cypher: string;
+    readonly params: Record<string, unknown>;
+}
+
+/** In-memory graph honoring the CypherAdapter's MATCH/MERGE/DETACH DELETE statements (dispatch by leading keyword). */
 export class FakeCypherSession implements ICypherSession
 {
-    private static readonly PropsAlias = "props";
-    private static readonly VersionAlias = "ver";
-    private static readonly KeyParam = "key";
-    private static readonly FieldsParam = "fields";
     private static readonly SeedIdField = "id";
-    private static readonly DetachDeleteKeyword = "DETACH DELETE";
-    private static readonly MergeKeyword = "MERGE";
-    private static readonly LabelPattern = /\(n:`([^`]+)`/;
-    private static readonly IdFieldPattern = /\{`([^`]+)`:/;
-    private static readonly ReturnedVersionPattern = /RETURN n\.`([^`]+)` AS ver/;
+    private static readonly Empty = "";
+    private static readonly Backtick = "`";
+    private static readonly EscapedBacktick = "``";
+    // (n:`Label` {`idField`: $key}) -- quoted names may contain doubled backticks.
+    private static readonly QuotedName = "((?:[^`]|``)*)";
+    private static readonly HeadPattern = new RegExp(
+        "^(?:MATCH|MERGE) \\(n:`" + FakeCypherSession.QuotedName + "`(?: \\{`" + FakeCypherSession.QuotedName + "`:[^}]*\\})?\\)");
+    private static readonly VersionFieldPattern = new RegExp("^n\\.`" + FakeCypherSession.QuotedName + "`");
 
+    public readonly Statements: RecordedStatement[] = [];
     private readonly store = new Map<string, Map<string, Record<string, unknown>>>();
 
     public Seed(label: string, records: Record<string, unknown>[]): this
@@ -29,29 +37,39 @@ export class FakeCypherSession implements ICypherSession
 
     public async Run(cypher: string, params: Record<string, unknown>): Promise<readonly CypherRow[]>
     {
-        const label = FakeCypherSession.LabelPattern.exec(cypher)?.[1] ?? "";
+        this.Statements.push({ cypher, params });
+        const head = FakeCypherSession.HeadPattern.exec(cypher);
+        const label = FakeCypherSession.Unescape(head?.[1] ?? FakeCypherSession.Empty);
+        const idField = FakeCypherSession.Unescape(head?.[2] ?? FakeCypherSession.SeedIdField);
+        const tail = cypher.slice(head?.[0].length ?? 0).trimStart();
         const bucket = this.store.get(label);
-        const key = String(params[FakeCypherSession.KeyParam]);
-        if (cypher.includes(FakeCypherSession.DetachDeleteKeyword))
+        const key = String(params[CypherAdapter.KeyParam]);
+        if (cypher.startsWith(CypherAdapter.Merge))
+        {
+            const live = bucket ?? new Map<string, Record<string, unknown>>();
+            this.store.set(label, live);
+            const fields = params[CypherAdapter.FieldsParam] as Record<string, unknown>;
+            live.set(key, { ...(live.get(key) ?? {}), ...fields, [idField]: params[CypherAdapter.KeyParam] });
+            return [];
+        }
+        if (tail.startsWith(CypherAdapter.DetachDelete))
         {
             bucket?.delete(key);
             return [];
         }
-        if (cypher.includes(FakeCypherSession.MergeKeyword))
-        {
-            const idField = FakeCypherSession.IdFieldPattern.exec(cypher)?.[1] ?? FakeCypherSession.SeedIdField;
-            const live = bucket ?? new Map<string, Record<string, unknown>>();
-            this.store.set(label, live);
-            const fields = params[FakeCypherSession.FieldsParam] as Record<string, unknown>;
-            live.set(key, { ...(live.get(key) ?? {}), ...fields, [idField]: params[FakeCypherSession.KeyParam] });
-            return [];
-        }
-        const versionMatch = FakeCypherSession.ReturnedVersionPattern.exec(cypher);
+        const returned = tail.slice(CypherAdapter.Return.length).trimStart();
+        const versionMatch = FakeCypherSession.VersionFieldPattern.exec(returned);
         if (versionMatch !== null)
         {
             const node = bucket?.get(key);
-            return node === undefined ? [] : [{ [FakeCypherSession.VersionAlias]: node[versionMatch[1]!] ?? null }];
+            const field = FakeCypherSession.Unescape(versionMatch[1]!);
+            return node === undefined ? [] : [{ [CypherAdapter.VersionAlias]: node[field] ?? null }];
         }
-        return [...(bucket?.values() ?? [])].map(props => ({ [FakeCypherSession.PropsAlias]: props }));
+        return [...(bucket?.values() ?? [])].map(props => ({ [CypherAdapter.PropsAlias]: props }));
+    }
+
+    private static Unescape(quoted: string): string
+    {
+        return quoted.replaceAll(FakeCypherSession.EscapedBacktick, FakeCypherSession.Backtick);
     }
 }
