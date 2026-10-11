@@ -46,7 +46,7 @@ class ResettingSession implements ISqlSession
 
     public async Dispose(): Promise<void>
     {
-        await this.inner.Dispose();
+        await this.inner.Dispose?.();
     }
 
     private EnsureReset(): Promise<void>
