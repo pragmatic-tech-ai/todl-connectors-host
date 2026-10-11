@@ -15,9 +15,9 @@ export class DocumentConnectionConfig
 {
     public static readonly UserKey = "user";
     public static readonly VersionFieldKey = "versionField";
-    private static readonly UrlKey = "url";
+    public static readonly UrlKey = "url";
     private static readonly UriKey = "uri";
-    private static readonly DatabaseKey = "database";
+    public static readonly DatabaseKey = "database";
     private static readonly MissingMessage = "document connector config requires 'url'/'uri' and 'database'";
 
     public static From(config: Record<string, string>, secret?: string): DocumentConnection
@@ -67,12 +67,12 @@ export class MongoDocumentSession implements IDocumentSession
         return result.deletedCount > 0;
     }
 
-    /** Returns the configured version field's value when known (else the whole doc); null when absent. */
+    /** Enabling optimistic versioning on a document source requires configuring the versionField key; without it, writes are not version-guarded. */
     public async ReadVersion(collection: string, idField: string, key: unknown): Promise<unknown>
     {
         const doc = await this.client.db(this.database).collection(collection).findOne({ [idField]: key });
-        if (doc === null) return null;
-        return this.versionField !== undefined ? (doc[this.versionField] ?? null) : doc;
+        if (doc === null || this.versionField === undefined) return null;
+        return doc[this.versionField] ?? null;
     }
 
     public async Dispose(): Promise<void>

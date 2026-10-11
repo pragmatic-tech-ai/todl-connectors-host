@@ -10,6 +10,7 @@ class SeedingDocumentSession implements IDocumentSession
 {
     private static readonly Collection = "Customer";
     private static readonly IdField = "id";
+    private static readonly LabelField = "label";
     private static readonly SeedId = "c1";
     private static readonly SeedLabel = "Acme";
 
@@ -73,9 +74,7 @@ class LiveMongo
     private static readonly DefaultDatabase = "connectors_test";
     private static readonly SkipName = "Document live conformance (CONNECTORS_LIVE_MONGO unset)";
     private static readonly SuiteName = "DocumentAdapter (live mongo)";
-    private static readonly UrlKey = "url";
-    private static readonly DatabaseKey = "database";
-
+    
     private static readonly opened: DocumentAdapter[] = [];
 
     /** Registers the live contract when enabled (human-run against provisioned mongo), else one skipped test. */
@@ -100,8 +99,8 @@ class LiveMongo
     {
         const config: Record<string, string> =
         {
-            [LiveMongo.UrlKey]: url,
-            [LiveMongo.DatabaseKey]: process.env[LiveMongo.DatabaseVar] ?? LiveMongo.DefaultDatabase,
+            [DocumentConnectionConfig.UrlKey]: url,
+            [DocumentConnectionConfig.DatabaseKey]: process.env[LiveMongo.DatabaseVar] ?? LiveMongo.DefaultDatabase,
         };
         const session = MongoDocumentSession.Connect(DocumentConnectionConfig.From(config));
         const adapter = new DocumentAdapter(new SeedingDocumentSession(session));
