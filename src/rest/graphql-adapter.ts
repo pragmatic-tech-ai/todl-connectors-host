@@ -71,7 +71,6 @@ export class GraphQlName
 export class GraphQlAdapter implements IDataSourceAdapter
 {
     private static readonly WriteNotConfiguredReason = "graphql write not configured";
-    private static readonly SourceMismatchMessage = "graphql connector is not configured for the requested source";
     private static readonly DataKey = "data";
     private static readonly ErrorsKey = "errors";
     private static readonly RequestFailedMessage = "graphql request failed";
@@ -97,10 +96,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
-        if (request.Source !== this.connection.source)
-        {
-            throw new Error(GraphQlAdapter.SourceMismatchMessage);
-        }
+        if (request.Source !== this.connection.source) return [];
         const document = this.QueryDocument(GraphQlAdapter.Selection(request));
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
             { [GraphQlAdapter.QueryKey]: document });

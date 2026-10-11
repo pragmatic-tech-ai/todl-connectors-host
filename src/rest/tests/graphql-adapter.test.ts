@@ -39,12 +39,12 @@ class ErrorClient extends FakeGraphQlHttpClient
     }
 }
 
-describeDataSourceAdapter("GraphQlAdapter (fake client)", () => GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull()), true);
+describeDataSourceAdapter("GraphQlAdapter (fake client)", () => GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull()));
 
-test("querying a source other than the configured one is rejected, not silently empty", async () =>
+test("querying a source other than the configured one yields no records", async () =>
 {
-    const adapter = GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull());
-    await assert.rejects(adapter.Query({ Source: "Nope", Fields: ["id"] }), /not configured for the requested source/);
+    const rows = await GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull()).Query({ Source: "Nope", Fields: ["id"] });
+    assert.deepEqual(rows, []);
 });
 
 test("writes with no configured mutation become conflicts, never throw", async () =>

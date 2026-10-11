@@ -17,10 +17,9 @@ const UpdatedLabel = "Acme 2";
  * Contract every data-source adapter must satisfy. The adapter returned by `make`
  * must hold source Customer seeded with a record { id, label } = c1/Acme.
  * Re-declared here because the engine's copy is a test-only helper not exported from its root barrel.
- * `unknownSourceRejects` selects the fail-loud contract (single-source adapters) over the empty-result contract.
  * This is the sanctioned module-level function (test-contract helper, mirrors the engine's own).
  */
-export function describeDataSourceAdapter(name: string, make: () => IDataSourceAdapter, unknownSourceRejects = false): void
+export function describeDataSourceAdapter(name: string, make: () => IDataSourceAdapter): void
 {
     test(`${name}: Query returns only the requested fields per record`, async () =>
     {
@@ -30,13 +29,8 @@ export function describeDataSourceAdapter(name: string, make: () => IDataSourceA
         assert.equal(rows[0]![IdKey], SeedId);
     });
 
-    test(`${name}: an unknown source ${unknownSourceRejects ? "is rejected" : "yields no records"}`, async () =>
+    test(`${name}: an unknown source yields no records`, async () =>
     {
-        if (unknownSourceRejects)
-        {
-            await assert.rejects(make().Query({ Source: UnknownSource, Fields: [IdKey] }));
-            return;
-        }
         const rows = await make().Query({ Source: UnknownSource, Fields: [IdKey] });
         assert.deepEqual(rows, []);
     });
