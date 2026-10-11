@@ -54,6 +54,7 @@ export class DocumentAdapter implements IDataSourceAdapter
         {
             const stored = (await this.session.ReadVersion(batch.Source, batch.IdKey, op.Key)) ?? null;
             // A not-yet-present doc reads null and is always writable.
+            // A present stored version with an absent expected op.Version (existing doc the caller did not version) is a conflict (fail-safe).
             if (stored !== null && stored !== (op.Version ?? null))
             {
                 return false;

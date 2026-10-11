@@ -15,6 +15,7 @@ export class MongoFilter
         const filter: Record<string, unknown> = {};
         for (const c of comparisons)
         {
+            // Two comparisons on the same field overwrite each other here; fine, as this is only a best-effort hint and ExternalQuery is authoritative.
             filter[c.Field] = c.Op === QueryCompareOp.Neq ? { [MongoFilter.NotEqualOperator]: c.Value } : c.Value;
         }
         return filter;
