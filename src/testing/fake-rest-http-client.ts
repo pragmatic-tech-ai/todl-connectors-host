@@ -7,10 +7,10 @@ export class FakeRestHttpClient implements IRestHttpClient
     private static readonly OkStatus = 200;
     private static readonly IdField = "id";
     private static readonly PathSeparator = "/";
+    private static readonly NoSource = "";
     private static readonly TrailingSlashes = /\/+$/;
     private readonly basePath: string;
     private readonly store = new Map<string, Map<string, Record<string, unknown>>>();
-    private ignoreFilters = false;
     private failStatus: number | undefined;
 
     public constructor(baseUrl: string)
@@ -26,15 +26,11 @@ export class FakeRestHttpClient implements IRestHttpClient
         return this;
     }
 
-    /** Make the backend return every row regardless of query params (proves the adapter re-filters). */
-    public IgnoreQueryParams(): this { this.ignoreFilters = true; return this; }
-
     /** Force the next Send to return this status (e.g. 409). */
     public FailNextWith(status: number): this { this.failStatus = status; return this; }
 
     public async GetJson(url: string, _headers?: Record<string, string>): Promise<unknown>
     {
-        void this.ignoreFilters; // the fake never filters server-side; the adapter is authoritative
         const [source] = this.PathParts(url);
         return [...(this.store.get(source)?.values() ?? [])];
     }
@@ -66,6 +62,6 @@ export class FakeRestHttpClient implements IRestHttpClient
         const path = new URL(url).pathname;
         const tail = path.startsWith(this.basePath) ? path.slice(this.basePath.length) : path;
         const segments = tail.split(FakeRestHttpClient.PathSeparator).filter(s => s.length > 0).map(s => decodeURIComponent(s));
-        return [segments[0] ?? "", segments[1]];
+        return [segments[0] ?? FakeRestHttpClient.NoSource, segments[1]];
     }
 }

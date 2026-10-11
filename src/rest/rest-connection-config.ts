@@ -7,6 +7,7 @@ export interface RestConnection
 
 export class RestConnectionConfig
 {
+    private static readonly TrailingSlashes = /\/+$/;
     private static readonly BaseUrlKey = "baseUrl";
     private static readonly AuthorizationHeader = "Authorization";
     private static readonly BearerPrefix = "Bearer ";
@@ -14,8 +15,9 @@ export class RestConnectionConfig
 
     public static From(config: Record<string, string>, secret?: string): RestConnection
     {
-        const baseUrl = config[RestConnectionConfig.BaseUrlKey];
-        if (baseUrl === undefined) throw new Error(RestConnectionConfig.MissingBaseUrlMessage);
+        const rawBaseUrl = config[RestConnectionConfig.BaseUrlKey];
+        if (rawBaseUrl === undefined) throw new Error(RestConnectionConfig.MissingBaseUrlMessage);
+        const baseUrl = rawBaseUrl.replace(RestConnectionConfig.TrailingSlashes, "");
         const headers: Record<string, string> = {};
         if (secret !== undefined) headers[RestConnectionConfig.AuthorizationHeader] = RestConnectionConfig.BearerPrefix + secret;
         return { baseUrl, headers };

@@ -12,7 +12,13 @@ export class RestAdapter implements IDataSourceAdapter
     private static readonly PathSeparator = "/";
     private static readonly IfMatchHeader = "If-Match";
     private static readonly ConflictStatus = 409;
+    private static readonly PreconditionFailedStatus = 412;
+    private static readonly NotFoundStatus = 404;
+    private static readonly SuccessMin = 200;
+    private static readonly SuccessMax = 299;
     private static readonly VersionConflictReason = "version mismatch";
+    private static readonly WriteFailedMessage = "rest write failed with status";
+    private static readonly ReadMalformedMessage = "rest read returned a non-array payload";
 
     public constructor(private readonly client: IRestHttpClient, private readonly connection: RestConnection)
     {
@@ -22,8 +28,8 @@ export class RestAdapter implements IDataSourceAdapter
     {
         const url = this.CollectionUrl(request.Source);
         const payload = await this.client.GetJson(url, this.connection.headers);
-        const records = Array.isArray(payload) ? payload as Record<string, unknown>[] : [];
-        return ExternalQuery.Apply(records, request);
+        if (!Array.isArray(payload)) throw new Error(RestAdapter.ReadMalformedMessage);
+        return ExternalQuery.Apply(payload as Record<string, unknown>[], request);
     }
 
     public async Apply(batch: WriteBatch): Promise<WriteResult>
@@ -34,7 +40,9 @@ export class RestAdapter implements IDataSourceAdapter
         {
             if (op.Kind === WriteOperationKind.Delete)
             {
-                await this.client.Send(RestHttpMethod.Delete, this.ResourceUrl(batch.Source, op.Key), this.connection.headers);
+                const response = await this.client.Send(
+                    RestHttpMethod.Delete, this.ResourceUrl(batch.Source, op.Key), this.connection.headers);
+                if (response.Status !== RestAdapter.NotFoundStatus) RestAdapter.EnsureSuccess(response.Status);
                 applied++;
             }
             else if (await this.ApplyUpsert(batch, op)) applied++;
@@ -56,7 +64,21 @@ export class RestAdapter implements IDataSourceAdapter
         }
         const response = await this.client.Send(
             RestHttpMethod.Put, this.ResourceUrl(batch.Source, op.Key), headers, op.Fields);
-        return response.Status !== RestAdapter.ConflictStatus;
+        if (RestAdapter.IsVersionConflict(response.Status)) return false;
+        RestAdapter.EnsureSuccess(response.Status);
+        return true;
+    }
+
+    private static IsVersionConflict(status: number): boolean
+    {
+        return status === RestAdapter.ConflictStatus || status === RestAdapter.PreconditionFailedStatus;
+    }
+
+    /** Throws a secret-free, status-only error for any non-2xx status. */
+    private static EnsureSuccess(status: number): void
+    {
+        if (status >= RestAdapter.SuccessMin && status <= RestAdapter.SuccessMax) return;
+        throw new Error(`${RestAdapter.WriteFailedMessage} ${status}`);
     }
 
     private CollectionUrl(source: string): string
