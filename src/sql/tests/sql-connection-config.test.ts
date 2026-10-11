@@ -23,10 +23,25 @@ test("From passes a connectionString through and still injects the secret", () =
 
 test("From throws a secret-free error when neither connectionString nor database is given", () =>
 {
-    assert.throws(() => SqlConnectionConfig.From({ host: "db" }, "pw"), (err: Error) =>
+    assert.throws(() => SqlConnectionConfig.From({ host: "db" }, "S3cretValue_XYZ"), (err: Error) =>
     {
         assert.match(err.message, /database/);
-        assert.doesNotMatch(err.message, /pw/);
+        assert.doesNotMatch(err.message, /S3cretValue_XYZ/);
+        return true;
+    });
+});
+
+test("From treats an empty database/connectionString as missing", () =>
+{
+    assert.throws(() => SqlConnectionConfig.From({ database: "", connectionString: "" }, "S3cretValue_XYZ"), /database/);
+});
+
+test("From throws a secret-free error when port is not numeric", () =>
+{
+    assert.throws(() => SqlConnectionConfig.From({ database: "app", port: "abc" }, "S3cretValue_XYZ"), (err: Error) =>
+    {
+        assert.match(err.message, /port/);
+        assert.doesNotMatch(err.message, /S3cretValue_XYZ/);
         return true;
     });
 });

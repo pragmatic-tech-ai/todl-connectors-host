@@ -23,21 +23,37 @@ export class SqlConnectionConfig
     private static readonly MissingTargetMessage =
         "sql connector config must supply 'connectionString' or 'database'";
 
+    private static readonly InvalidPortMessage = "sql connector config 'port' must be a number";
+
     public static From(config: Record<string, string>, secret?: string): PgPoolOptions
     {
         const connectionString = config[SqlConnectionConfig.ConnectionStringKey];
         const database = config[SqlConnectionConfig.DatabaseKey];
-        if (connectionString === undefined && database === undefined)
+        const host = config[SqlConnectionConfig.HostKey];
+        const port = config[SqlConnectionConfig.PortKey];
+        const user = config[SqlConnectionConfig.UserKey];
+        const ssl = config[SqlConnectionConfig.SslKey];
+        const hasConnectionString = connectionString !== undefined && connectionString !== "";
+        const hasDatabase = database !== undefined && database !== "";
+        if (!hasConnectionString && !hasDatabase)
         {
             throw new Error(SqlConnectionConfig.MissingTargetMessage);
         }
         const opts: PgPoolOptions = {};
-        if (connectionString !== undefined) opts.connectionString = connectionString;
-        if (config[SqlConnectionConfig.HostKey] !== undefined) opts.host = config[SqlConnectionConfig.HostKey];
-        if (config[SqlConnectionConfig.PortKey] !== undefined) opts.port = Number(config[SqlConnectionConfig.PortKey]);
-        if (database !== undefined) opts.database = database;
-        if (config[SqlConnectionConfig.UserKey] !== undefined) opts.user = config[SqlConnectionConfig.UserKey];
-        if (config[SqlConnectionConfig.SslKey] === SqlConnectionConfig.TrueLiteral) opts.ssl = true;
+        if (hasConnectionString) opts.connectionString = connectionString;
+        if (host !== undefined) opts.host = host;
+        if (port !== undefined)
+        {
+            const parsed = Number(port);
+            if (Number.isNaN(parsed))
+            {
+                throw new Error(SqlConnectionConfig.InvalidPortMessage);
+            }
+            opts.port = parsed;
+        }
+        if (hasDatabase) opts.database = database;
+        if (user !== undefined) opts.user = user;
+        if (ssl === SqlConnectionConfig.TrueLiteral) opts.ssl = true;
         if (secret !== undefined) opts.password = secret;
         return opts;
     }
