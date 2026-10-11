@@ -44,12 +44,12 @@ export class SqlConnectionConfig
         if (host !== undefined) opts.host = host;
         if (port !== undefined)
         {
-            const parsed = Number(port);
-            if (Number.isNaN(parsed))
+            const portNumber = Number(port);
+            if (!(Number.isInteger(portNumber) && portNumber > 0))
             {
                 throw new Error(SqlConnectionConfig.InvalidPortMessage);
             }
-            opts.port = parsed;
+            opts.port = portNumber;
         }
         if (hasDatabase) opts.database = database;
         if (user !== undefined) opts.user = user;

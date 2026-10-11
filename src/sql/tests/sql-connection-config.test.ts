@@ -31,6 +31,13 @@ test("From throws a secret-free error when neither connectionString nor database
     });
 });
 
+test("From rejects empty/Infinity port and accepts a valid one", () =>
+{
+    assert.throws(() => SqlConnectionConfig.From({ database: "app", port: "" }), /'port' must be a number/);
+    assert.throws(() => SqlConnectionConfig.From({ database: "app", port: "Infinity" }), /'port' must be a number/);
+    assert.equal(SqlConnectionConfig.From({ database: "app", port: "5432" }).port, 5432);
+});
+
 test("From treats an empty database/connectionString as missing", () =>
 {
     assert.throws(() => SqlConnectionConfig.From({ database: "", connectionString: "" }, "S3cretValue_XYZ"), /database/);
