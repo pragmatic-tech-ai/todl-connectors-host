@@ -21,3 +21,6 @@ export type { CypherConnection } from "./cypher/neo4j-cypher-session.js";
 export { DocumentAdapter } from "./document/document-adapter.js";
 export { MongoFilter } from "./document/mongo-filter.js";
 export type { IDocumentSession } from "./document/document-session.js";
+export { DocumentAdapterFactory } from "./document/document-adapter-factory.js";
+export { DocumentConnectionConfig, MongoDocumentSession } from "./document/mongo-document-session.js";
+export type { DocumentConnection } from "./document/mongo-document-session.js";
