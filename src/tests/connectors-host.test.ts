@@ -10,6 +10,9 @@ import type { Pool } from "pg";
 class HostTestSupport
 {
     public static readonly RestBaseUrl = "https://api.example";
+    public static readonly SqlConnectorName = "s";
+    public static readonly Database = "app";
+    public static readonly BaseUrlKey = "baseUrl";
 
     public static SpecOf(name: string, kind: DataSourceKind, config: Record<string, string>): ConnectorSpec
     {
@@ -39,9 +42,9 @@ test("all four kinds route to a factory (not the 'no adapter for kind' error)", 
     const services = new ServiceProvider();
     await assert.rejects(() => host.Catalog.Open(HostTestSupport.SpecOf("c", DataSourceKind.Cypher, {}), services), /uri/);
     await assert.rejects(() => host.Catalog.Open(HostTestSupport.SpecOf("d", DataSourceKind.Document, {}), services), /url/);
-    await assert.rejects(() => host.Catalog.Open(HostTestSupport.SpecOf("s", DataSourceKind.Sql, {}), services), /database|connectionString/);
+    await assert.rejects(() => host.Catalog.Open(HostTestSupport.SpecOf(HostTestSupport.SqlConnectorName, DataSourceKind.Sql, {}), services), /database|connectionString/);
     const withRest = new ConnectorsHost({ restClient: new FakeRestHttpClient(HostTestSupport.RestBaseUrl) });
-    const rest = await withRest.Catalog.Open(HostTestSupport.SpecOf("r", DataSourceKind.Rest, { baseUrl: HostTestSupport.RestBaseUrl }), services);
+    const rest = await withRest.Catalog.Open(HostTestSupport.SpecOf("r", DataSourceKind.Rest, { [HostTestSupport.BaseUrlKey]: HostTestSupport.RestBaseUrl }), services);
     assert.ok(rest);
 });
 
@@ -50,7 +53,7 @@ test("Dispose tears down the catalog without throwing", async () =>
     let ended = 0;
     const host = new ConnectorsHost({ buildPool: () => HostTestSupport.FakePool(() => { ended++; }) });
     const services = new ServiceProvider();
-    await host.Catalog.Open(HostTestSupport.SpecOf("s", DataSourceKind.Sql, { database: "app" }), services);
+    await host.Catalog.Open(HostTestSupport.SpecOf(HostTestSupport.SqlConnectorName, DataSourceKind.Sql, { database: HostTestSupport.Database }), services);
     await host.Dispose();
     assert.equal(ended, 1);
 });
