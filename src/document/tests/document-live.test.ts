@@ -63,7 +63,7 @@ class SeedingDocumentSession implements IDocumentSession
             await this.inner.Delete(SeedingDocumentSession.Collection, SeedingDocumentSession.IdField, doc[SeedingDocumentSession.IdField]);
         }
         await this.inner.Upsert(SeedingDocumentSession.Collection, SeedingDocumentSession.IdField, SeedingDocumentSession.SeedId,
-            { [SeedingDocumentSession.IdField]: SeedingDocumentSession.SeedId, label: SeedingDocumentSession.SeedLabel });
+            { [SeedingDocumentSession.IdField]: SeedingDocumentSession.SeedId, [SeedingDocumentSession.LabelField]: SeedingDocumentSession.SeedLabel });
     }
 }
 
