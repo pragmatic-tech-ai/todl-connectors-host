@@ -11,3 +11,4 @@ export { RestConnectionConfig } from "./rest/rest-connection-config.js";
 export type { RestConnection } from "./rest/rest-connection-config.js";
 export { GraphQlAdapter, GraphQlConnectionConfig } from "./rest/graphql-adapter.js";
 export type { GraphQlConnection } from "./rest/graphql-adapter.js";
+export { RestAdapterFactory } from "./rest/rest-adapter-factory.js";
