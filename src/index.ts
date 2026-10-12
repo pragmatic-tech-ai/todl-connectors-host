@@ -26,3 +26,6 @@ export { DocumentConnectionConfig, MongoDocumentSession } from "./document/mongo
 export type { DocumentConnection } from "./document/mongo-document-session.js";
 export { ConnectorsHost } from "./connectors-host.js";
 export type { ConnectorsHostOptions } from "./connectors-host.js";
+export { RecordingResolutionAuditSink } from "./resolution-audit/recording-resolution-audit-sink.js";
+export type { IResolutionAuditSink, ResolutionAuditEvent } from "@pragmatic-tech-ai/todl";
+export { ResolutionAuditSinkKey } from "@pragmatic-tech-ai/todl";
