@@ -1,5 +1,5 @@
-import { DataSourceAdapterCatalog, ConnectionResolverKey } from "@pragmatic-tech-ai/todl";
-import type { IConnectionResolver } from "@pragmatic-tech-ai/todl";
+import { DataSourceAdapterCatalog, ConnectionResolverKey, ResolutionAuditSinkKey } from "@pragmatic-tech-ai/todl";
+import type { IConnectionResolver, IResolutionAuditSink } from "@pragmatic-tech-ai/todl";
 import type { ServiceProvider } from "@pragmatic-tech-ai/todl-runtime";
 import { SqlAdapterFactory } from "./sql/sql-adapter-factory.js";
 import type { PgPoolBuilder } from "./sql/sql-adapter-factory.js";
@@ -14,6 +14,7 @@ export interface ConnectorsHostOptions
     restClient?: IRestHttpClient;
     buildPool?: PgPoolBuilder;
     connectionResolver?: IConnectionResolver;
+    auditSink?: IResolutionAuditSink;
 }
 
 /** Composition root: registers all adapter factories and owns the catalog's lifecycle. */
@@ -22,10 +23,12 @@ export class ConnectorsHost
     public readonly Catalog: DataSourceAdapterCatalog;
 
     private readonly connectionResolver?: IConnectionResolver;
+    private readonly auditSink?: IResolutionAuditSink;
 
     public constructor(options?: ConnectorsHostOptions)
     {
         this.connectionResolver = options?.connectionResolver;
+        this.auditSink = options?.auditSink;
         this.Catalog = new DataSourceAdapterCatalog()
             .Register(new SqlAdapterFactory(options?.buildPool))
             .Register(new RestAdapterFactory(options?.restClient))
@@ -39,6 +42,10 @@ export class ConnectorsHost
         if (this.connectionResolver !== undefined)
         {
             services.registerInstance(ConnectionResolverKey, this.connectionResolver);
+        }
+        if (this.auditSink !== undefined)
+        {
+            services.registerInstance(ResolutionAuditSinkKey, this.auditSink);
         }
         return this;
     }

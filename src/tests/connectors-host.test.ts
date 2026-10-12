@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ServiceProvider } from "@pragmatic-tech-ai/todl-runtime";
-import { DataSourceAdapterCatalog, DataSourceKind, ConnectionResolverKey } from "@pragmatic-tech-ai/todl";
+import { DataSourceAdapterCatalog, DataSourceKind, ConnectionResolverKey, ResolutionAuditSinkKey } from "@pragmatic-tech-ai/todl";
 import type { IConnectionResolver, ResolvedConnection, ConnectorSpec } from "@pragmatic-tech-ai/todl";
 import { ConnectorsHost } from "../connectors-host.js";
+import { RecordingResolutionAuditSink } from "../resolution-audit/recording-resolution-audit-sink.js";
 import { FakeRestHttpClient } from "../testing/fake-rest-http-client.js";
 import type { Pool } from "pg";
 
@@ -64,4 +65,19 @@ test("an options resolver is registered under ConnectionResolverKey", () =>
     const services = new ServiceProvider();
     new ConnectorsHost({ connectionResolver: resolver }).Register(services);
     assert.equal(services.getRequired(ConnectionResolverKey), resolver);
+});
+
+test("Register wires the audit sink under ResolutionAuditSinkKey when provided", () =>
+{
+    const sink = new RecordingResolutionAuditSink();
+    const services = new ServiceProvider();
+    new ConnectorsHost({ auditSink: sink }).Register(services);
+    assert.equal(services.getRequired(ResolutionAuditSinkKey), sink);
+});
+
+test("without an audit sink the key is absent", () =>
+{
+    const services = new ServiceProvider();
+    new ConnectorsHost().Register(services);
+    assert.equal(services.has(ResolutionAuditSinkKey), false);
 });
