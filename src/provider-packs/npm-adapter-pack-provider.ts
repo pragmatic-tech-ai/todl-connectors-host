@@ -35,13 +35,16 @@ interface ProviderSpec
 export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
 {
     private static readonly SpecSeparator = "@";
-    private static readonly ScopeSeparator = "/";
     private static readonly OverrideDisabledMessage = "connector provider override is disabled by policy";
     private static readonly NotAllowlistedMessage = "connector provider is not allowlisted";
     private static readonly MissingProviderMessage = "npm adapter pack provider requires a named provider";
     private static readonly BadSpecMessage = "invalid adapter pack provider spec";
     private static readonly DisposedMessage = "npm adapter pack provider is disposed";
     private static readonly LatestRange = "latest";
+    private static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+    /** Registry semver version/range or dist-tag characters only: no ":" or "/" so no url/file/git/alias specifiers. */
+    private static readonly RangePattern = /^[A-Za-z0-9.+^~<>=*| -]+$/;
+    private static readonly ParentSegment = "..";
 
     private readonly installer: AdapterPackInstaller;
     private readonly cache: PackCache;
@@ -58,15 +61,21 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
 
     public async Resolve(request: AdapterResolutionRequest): Promise<IDataSourceAdapterFactory>
     {
+        this.EnsureLive();
+        const spec = NpmAdapterPackProvider.ParseSpec(request.Provider);
+        this.Admit(spec);
+        const installed = await this.installer.Install(spec.Name, spec.Range);
+        this.EnsureLive();
+        const sandbox = await this.LaunchFor(installed);
+        return sandbox.Factory(request.Kind);
+    }
+
+    private EnsureLive(): void
+    {
         if (this.disposed)
         {
             throw new AdapterPackError(AdapterPackErrorKind.SandboxCrashed, NpmAdapterPackProvider.DisposedMessage);
         }
-        const spec = NpmAdapterPackProvider.ParseSpec(request.Provider);
-        this.Admit(spec);
-        const installed = await this.installer.Install(spec.Name, spec.Range);
-        const sandbox = await this.LaunchFor(installed);
-        return sandbox.Factory(request.Kind);
     }
 
     public async Dispose(): Promise<void>
@@ -88,9 +97,8 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         const hasRange = at > 0;
         const name = hasRange ? provider.slice(0, at) : provider;
         const range = hasRange ? provider.slice(at + 1) : NpmAdapterPackProvider.LatestRange;
-        const scoped = name.startsWith(NpmAdapterPackProvider.SpecSeparator);
-        const badScope = scoped && name.indexOf(NpmAdapterPackProvider.ScopeSeparator) < 2;
-        if (name.length === 0 || range.length === 0 || badScope)
+        const badRange = !NpmAdapterPackProvider.RangePattern.test(range) || range.includes(NpmAdapterPackProvider.ParentSegment);
+        if (!NpmAdapterPackProvider.NamePattern.test(name) || badRange)
         {
             throw new AdapterPackError(AdapterPackErrorKind.ProviderSpecInvalid, NpmAdapterPackProvider.BadSpecMessage);
         }
@@ -122,9 +130,20 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         {
             return existing;
         }
-        const launch = this.options.sandboxFactory.Launch(installed, this.options.sandboxOptions).catch((err: unknown) =>
+        const launch: Promise<IPackSandbox> = this.options.sandboxFactory.Launch(installed, this.options.sandboxOptions).then(async sandbox =>
         {
-            this.launches.delete(installed.Root);
+            if (this.disposed)
+            {
+                await sandbox.Dispose().catch(() => undefined);
+                throw new AdapterPackError(AdapterPackErrorKind.SandboxCrashed, NpmAdapterPackProvider.DisposedMessage);
+            }
+            return sandbox;
+        }).catch((err: unknown) =>
+        {
+            if (this.launches.get(installed.Root) === launch)
+            {
+                this.launches.delete(installed.Root);
+            }
             throw err;
         });
         this.launches.set(installed.Root, launch);

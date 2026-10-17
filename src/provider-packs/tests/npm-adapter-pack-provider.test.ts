@@ -17,18 +17,20 @@ class FakeNpm implements INpmCli
 {
     public Installs = 0;
     public Audits = 0;
+    public Versions: Record<string, string> = {};
 
     public async Install(cwd: string): Promise<void>
     {
         this.Installs++;
         const json = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as { dependencies: Record<string, string> };
         const name = Object.keys(json.dependencies)[0];
+        const version = this.Versions[json.dependencies[name]] ?? "1.0.0";
         const pkgDir = join(cwd, "node_modules", name);
         mkdirSync(pkgDir, { recursive: true });
         const block = { entry: "./dist/pack.js", kinds: ["sql", "rest"], sdk: AdapterPackContract.AbiVersion };
-        const pkg = { name, version: "1.0.0", [AdapterPackContract.TodlBlockKey]: { [AdapterPackContract.ManifestKey]: block } };
+        const pkg = { name, version, [AdapterPackContract.TodlBlockKey]: { [AdapterPackContract.ManifestKey]: block } };
         writeFileSync(join(pkgDir, "package.json"), JSON.stringify(pkg));
-        const lock = { lockfileVersion: 3, packages: { ["node_modules/" + name]: { version: "1.0.0" } } };
+        const lock = { lockfileVersion: 3, packages: { ["node_modules/" + name]: { version } } };
         writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
     }
 
@@ -41,6 +43,7 @@ class FakeNpm implements INpmCli
 class FakeSandbox implements IPackSandbox
 {
     public Disposed = false;
+    public ThrowOnDispose = false;
 
     public Factory(kind: DataSourceKind): IDataSourceAdapterFactory
     {
@@ -50,6 +53,10 @@ class FakeSandbox implements IPackSandbox
     public async Dispose(): Promise<void>
     {
         this.Disposed = true;
+        if (this.ThrowOnDispose)
+        {
+            throw new Error("dispose failed");
+        }
     }
 }
 
@@ -57,6 +64,8 @@ class FakeSandboxFactory implements IPackSandboxFactory
 {
     public Launches = 0;
     public FailNext = false;
+    public Gate: Promise<void> | undefined;
+    public ThrowOnDispose = false;
     public readonly Sandboxes: FakeSandbox[] = [];
 
     public async Launch(_installed: InstalledPack): Promise<IPackSandbox>
@@ -67,7 +76,12 @@ class FakeSandboxFactory implements IPackSandboxFactory
             this.FailNext = false;
             throw new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, "launch failed");
         }
+        if (this.Gate !== undefined)
+        {
+            await this.Gate;
+        }
         const sandbox = new FakeSandbox();
+        sandbox.ThrowOnDispose = this.ThrowOnDispose;
         this.Sandboxes.push(sandbox);
         return sandbox;
     }
@@ -254,5 +268,77 @@ test("Dispose disposes every launched sandbox and later resolves reject", async 
         await provider.Dispose();
         assert.ok(sandboxes.Sandboxes.every(s => s.Disposed));
         await assert.rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" }), AdapterPackError);
+    });
+});
+
+test("non-registry specifiers are rejected even when the bare name is allowlisted", async () =>
+{
+    await Env.With(async (provider, npm, sandboxes) =>
+    {
+        for (const spec of ["acme-pack@file:./p", "acme-pack@https://h/p.tgz", "acme-pack@github:u/r", "acme-pack@git+ssh://h/r", "acme-pack@npm:evil@1", "acme-pack@../x"])
+        {
+            await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec }), AdapterPackErrorKind.ProviderSpecInvalid);
+        }
+        assert.equal(npm.Installs, 0);
+        assert.equal(sandboxes.Launches, 0);
+    });
+});
+
+test("malformed names are rejected", async () =>
+{
+    await Env.With(async (provider, npm) =>
+    {
+        for (const spec of ["@scope/", "@scope/@1", "a/b@1", "a@b@1", "@/x@1"])
+        {
+            await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec }), AdapterPackErrorKind.ProviderSpecInvalid);
+        }
+        assert.equal(npm.Installs, 0);
+    });
+});
+
+test("sandboxes are keyed by resolved root: same version shares, different versions do not", async () =>
+{
+    await Env.With(async (provider, npm, sandboxes) =>
+    {
+        npm.Versions = { "^1": "1.0.0", "~1.0": "1.0.0", "^2": "2.0.0" };
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@~1.0" });
+        assert.equal(sandboxes.Launches, 1);
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^2" });
+        assert.equal(sandboxes.Launches, 2);
+    });
+});
+
+test("a throwing sandbox Dispose does not stop the others from being disposed", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        sandboxes.ThrowOnDispose = true;
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "other-pack@^1" });
+        sandboxes.Sandboxes[0].ThrowOnDispose = true;
+        await provider.Dispose();
+        assert.ok(sandboxes.Sandboxes.every(s => s.Disposed));
+    });
+});
+
+test("a sandbox that finishes launching after Dispose is torn down and the resolve rejects", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        let release!: () => void;
+        sandboxes.Gate = new Promise<void>(r => { release = r; });
+        const pending = provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        const settled = assert.rejects(pending, AdapterPackError);
+        while (sandboxes.Launches === 0)
+        {
+            await new Promise<void>(r => setTimeout(r, 5));
+        }
+        const disposing = provider.Dispose();
+        release();
+        await disposing;
+        await settled;
+        assert.equal(sandboxes.Sandboxes.length, 1);
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
     });
 });
