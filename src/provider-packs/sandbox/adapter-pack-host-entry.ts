@@ -116,7 +116,9 @@ export class AdapterPackHost
         const adapter = await factory.Open(req.connection!);
         const handle = this.nextHandle++;
         this.adapters.set(handle, adapter);
-        return { id: req.id, ok: true, handle };
+        // Forward the wrapped adapter's capabilities so the host-side proxy can advertise them;
+        // normalized to strict booleans so the open-response stays JSON-safe (never undefined on the wire).
+        return { id: req.id, ok: true, handle, canTransact: adapter.CanTransact === true, canVersion: adapter.CanVersion === true };
     }
 
     private async DisposeAdapter(req: PackWorkerRequest): Promise<PackWorkerResponse>

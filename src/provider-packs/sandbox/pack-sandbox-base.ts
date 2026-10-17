@@ -193,15 +193,22 @@ export class PackProxyFactory implements IDataSourceAdapterFactory
     {
         const response = await this.sandbox.Call(PackWorkerOp.Open, { kind: this.Kind, connection });
         PackSandboxBase.EnsureOk(response);
-        return new PackProxyAdapter(this.sandbox, response.handle!);
+        // Forward the wrapped adapter's capabilities from the open-response; an older ABI omits them -> false.
+        return new PackProxyAdapter(this.sandbox, response.handle!, response.canTransact === true, response.canVersion === true);
     }
 }
 
-/** Host-side proxy for one open pack adapter, keyed by the pack-assigned handle. */
+/** Host-side proxy for one open pack adapter, keyed by the pack-assigned handle. Its capabilities mirror
+ *  the wrapped adapter's, forwarded through the Open response. */
 export class PackProxyAdapter implements IDataSourceAdapter
 {
-    public constructor(private readonly sandbox: PackSandboxBase, private readonly handle: number)
+    public readonly CanTransact: boolean;
+    public readonly CanVersion: boolean;
+
+    public constructor(private readonly sandbox: PackSandboxBase, private readonly handle: number, canTransact: boolean, canVersion: boolean)
     {
+        this.CanTransact = canTransact;
+        this.CanVersion = canVersion;
     }
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>

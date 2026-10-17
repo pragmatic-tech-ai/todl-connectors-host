@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { DataSourceKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { DataSourceKind, WriteAtomicity, WriteConcurrency, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { ExternalRecord } from "@pragmatic-tech-ai/todl";
 import { AdapterPackError, AdapterPackErrorKind } from "../../adapter-pack-error.js";
 import type { InstalledPack } from "../../adapter-pack-installer.js";
@@ -176,6 +176,10 @@ test("child: Open + Query returns the seeded records and Apply round-trips its W
     {
         const adapter = await sandbox.Factory(DataSourceKind.Sql).Open({ Kind: DataSourceKind.Sql, Config: {} });
 
+        // The example pack advertises no capabilities, so the proxy forwards the weakest guarantee over IPC.
+        assert.equal(adapter.CanTransact, false);
+        assert.equal(adapter.CanVersion, false);
+
         const records = await adapter.Query({ Source: ChildSandboxFixture.WidgetsSource, Fields: [ChildSandboxFixture.IdField, ChildSandboxFixture.NameField] });
         assert.deepEqual(records, ChildSandboxFixture.ExpectedWidgets);
 
@@ -183,6 +187,8 @@ test("child: Open + Query returns the seeded records and Apply round-trips its W
         {
             Source: ChildSandboxFixture.WidgetsSource,
             IdKey: ChildSandboxFixture.IdField,
+            Concurrency: WriteConcurrency.LastWriteWins,
+            Atomicity: WriteAtomicity.Sequential,
             Operations: [{ Kind: WriteOperationKind.Upsert, Key: 1, Fields: { [ChildSandboxFixture.NameField]: ChildSandboxFixture.GammaName } }]
         });
         assert.deepEqual(result, { Applied: 1, Failures: [] });

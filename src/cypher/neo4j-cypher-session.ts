@@ -1,5 +1,5 @@
 import neo4j from "neo4j-driver";
-import type { Driver } from "neo4j-driver";
+import type { Driver, ManagedTransaction, QueryResult } from "neo4j-driver";
 import type { CypherRow, ICypherSession } from "./cypher-session.js";
 
 /** Parsed neo4j connection. */
@@ -50,10 +50,25 @@ export class Neo4jCypherSession implements ICypherSession
         const session = this.database !== undefined ? this.driver.session({ database: this.database }) : this.driver.session();
         try
         {
-            const result = await session.run(cypher, params);
-            // neo4j-native values (Integer, temporal, ...) pass through ExternalQuery.Coerce, which stringifies
-            // non-scalars (Integer -> decimal string), like the SQL adapter's numeric->string; richer typing is deferred.
-            return result.records.map(record => Object.fromEntries(record.keys.map(k => [k, record.get(k)])) as CypherRow);
+            return Neo4jCypherSession.ToRows(await session.run(cypher, params));
+        }
+        finally
+        {
+            await session.close();
+        }
+    }
+
+    /**
+     * Runs work inside one driver-managed write transaction (executeWrite): a transaction-bound session is
+     * handed to work, and any throw (e.g. a RollbackSignal) aborts and rethrows, so the caller reports
+     * nothing applied. The session is closed in a finally regardless of outcome.
+     */
+    public async Transaction<T>(work: (tx: ICypherSession) => Promise<T>): Promise<T>
+    {
+        const session = this.database !== undefined ? this.driver.session({ database: this.database }) : this.driver.session();
+        try
+        {
+            return await session.executeWrite(async (tx) => work(new Neo4jManagedTransactionSession(tx)));
         }
         finally
         {
@@ -64,5 +79,28 @@ export class Neo4jCypherSession implements ICypherSession
     public async Dispose(): Promise<void>
     {
         await this.driver.close();
+    }
+
+    /**
+     * Maps a driver result to plain CypherRows. neo4j-native values (Integer, temporal, ...) pass through
+     * ExternalQuery.Coerce, which stringifies non-scalars (Integer -> decimal string), like the SQL
+     * adapter's numeric->string; richer typing is deferred.
+     */
+    public static ToRows(result: QueryResult): readonly CypherRow[]
+    {
+        return result.records.map(record => Object.fromEntries(record.keys.map(k => [k, record.get(k)])) as CypherRow);
+    }
+}
+
+/** An ICypherSession bound to one neo4j managed transaction: every Run joins the open transaction. */
+export class Neo4jManagedTransactionSession implements ICypherSession
+{
+    public constructor(private readonly tx: ManagedTransaction)
+    {
+    }
+
+    public async Run(cypher: string, params: Record<string, unknown>): Promise<readonly CypherRow[]>
+    {
+        return Neo4jCypherSession.ToRows(await this.tx.run(cypher, params));
     }
 }

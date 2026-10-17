@@ -33,6 +33,12 @@ export interface PackWorkerResponse
     readonly records?: readonly ExternalRecord[];
     readonly result?: WriteResult;
     readonly error?: string;
+    /** On an Open response: the wrapped adapter's transaction capability, forwarded so the host-side
+     *  proxy advertises it. Optional/JSON-safe so an older pack ABI (no field) keeps working -> false. */
+    readonly canTransact?: boolean;
+    /** On an Open response: the wrapped adapter's optimistic-version capability. Optional for the same
+     *  reason -> false when absent. */
+    readonly canVersion?: boolean;
 }
 
 /** The single startup message the worker posts once the pack imported and its factories bound. */

@@ -22,7 +22,7 @@ export class FakeCypherSession implements ICypherSession
     private static readonly VersionFieldPattern = new RegExp("^n\\.`" + FakeCypherSession.QuotedName + "`");
 
     public readonly Statements: RecordedStatement[] = [];
-    private readonly store = new Map<string, Map<string, Record<string, unknown>>>();
+    protected readonly store = new Map<string, Map<string, Record<string, unknown>>>();
 
     public Seed(label: string, records: Record<string, unknown>[]): this
     {
@@ -68,8 +68,52 @@ export class FakeCypherSession implements ICypherSession
         return [...(bucket?.values() ?? [])].map(props => ({ [CypherAdapter.PropsAlias]: props }));
     }
 
+    /** Deep-copies the store so a transaction can roll back to this point. */
+    protected Snapshot(): Map<string, Map<string, Record<string, unknown>>>
+    {
+        const copy = new Map<string, Map<string, Record<string, unknown>>>();
+        for (const [label, bucket] of this.store)
+        {
+            const clone = new Map<string, Record<string, unknown>>();
+            for (const [key, record] of bucket)
+            {
+                clone.set(key, { ...record });
+            }
+            copy.set(label, clone);
+        }
+        return copy;
+    }
+
+    /** Replaces the live store with a prior snapshot (rollback). */
+    protected Restore(snapshot: Map<string, Map<string, Record<string, unknown>>>): void
+    {
+        this.store.clear();
+        for (const [label, bucket] of snapshot)
+        {
+            this.store.set(label, bucket);
+        }
+    }
+
     private static Unescape(quoted: string): string
     {
         return quoted.replaceAll(FakeCypherSession.EscapedBacktick, FakeCypherSession.Backtick);
+    }
+}
+
+/** A fake that CAN transact: runs work against itself, restoring the pre-transaction snapshot if it throws. */
+export class TransactionalFakeCypherSession extends FakeCypherSession
+{
+    public async Transaction<T>(work: (tx: ICypherSession) => Promise<T>): Promise<T>
+    {
+        const snapshot = this.Snapshot();
+        try
+        {
+            return await work(this);
+        }
+        catch (error)
+        {
+            this.Restore(snapshot);
+            throw error;
+        }
     }
 }

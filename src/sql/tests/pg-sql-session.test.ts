@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PgSqlSession } from "../pg-sql-session.js";
-import type { Pool } from "pg";
+import { Pool } from "pg";
 
 class FakePool
 {
@@ -110,3 +110,101 @@ test("Dispose ends the pool", async () =>
     await new PgSqlSession(new FakePool({ rows: [], rowCount: 0 }, () => { ended++; }).AsPool()).Dispose();
     assert.equal(ended, 1);
 });
+
+/** Records every statement issued on the pinned client and whether it was released. pg-mem cannot
+ *  honour a pinned-client ROLLBACK (verified), so the transaction mechanics are asserted against this
+ *  recorder; the real rollback is covered by the gated live Postgres test below. */
+class RecordingClient
+{
+    public readonly queries: string[] = [];
+    public released = 0;
+
+    public async query(sql: string, _params: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>
+    {
+        this.queries.push(sql);
+        return { rows: [], rowCount: 1 };
+    }
+
+    public release(): void
+    {
+        this.released++;
+    }
+}
+
+class RecordingPool
+{
+    public constructor(private readonly client: RecordingClient)
+    {
+    }
+
+    public async connect(): Promise<RecordingClient>
+    {
+        return this.client;
+    }
+
+    public AsPool(): Pool
+    {
+        return this as unknown as Pool;
+    }
+}
+
+const TxUpdateSql = "update t set x=1";
+
+test("Transaction pins a client, wraps work in BEGIN/COMMIT, and releases it", async () =>
+{
+    const client = new RecordingClient();
+    const session = new PgSqlSession(new RecordingPool(client).AsPool());
+    const out = await session.Transaction(async (tx) =>
+    {
+        await tx.Execute(TxUpdateSql, []);
+        return 42;
+    });
+    assert.equal(out, 42);
+    assert.deepEqual(client.queries, ["BEGIN", TxUpdateSql, "COMMIT"]);
+    assert.equal(client.released, 1);
+});
+
+test("Transaction issues ROLLBACK and rethrows when work throws, still releasing the client", async () =>
+{
+    const client = new RecordingClient();
+    const session = new PgSqlSession(new RecordingPool(client).AsPool());
+    const boom = new Error("boom");
+    await assert.rejects(session.Transaction(async (tx) =>
+    {
+        await tx.Execute(TxUpdateSql, []);
+        throw boom;
+    }), /boom/);
+    assert.deepEqual(client.queries, ["BEGIN", TxUpdateSql, "ROLLBACK"]);
+    assert.equal(client.released, 1);
+});
+
+// GATED LIVE: a real Postgres honours the pinned-client transaction -- COMMIT persists, ROLLBACK
+// undoes. Registered only when CONNECTORS_LIVE_PG is set and non-empty.
+const LiveEnvVar = "CONNECTORS_LIVE_PG";
+if ((process.env[LiveEnvVar] ?? "") !== "")
+{
+    test("live: Transaction commits on success and rolls back on throw", { timeout: 60000 }, async () =>
+    {
+        const session = new PgSqlSession(new Pool({ connectionString: process.env[LiveEnvVar]! }));
+        try
+        {
+            await session.Execute('DROP TABLE IF EXISTS "TxProbe"', []);
+            await session.Execute('CREATE TABLE "TxProbe" (id text primary key, v text)', []);
+            await session.Execute(`INSERT INTO "TxProbe" (id, v) VALUES ('a', '1')`, []);
+
+            await session.Transaction(async (tx) => { await tx.Execute(`UPDATE "TxProbe" SET v = '2' WHERE id = 'a'`, []); });
+            assert.equal((await session.Query(`SELECT v FROM "TxProbe" WHERE id = 'a'`, []))[0]!["v"], "2");
+
+            await assert.rejects(session.Transaction(async (tx) =>
+            {
+                await tx.Execute(`UPDATE "TxProbe" SET v = '9' WHERE id = 'a'`, []);
+                throw new Error("boom");
+            }), /boom/);
+            assert.equal((await session.Query(`SELECT v FROM "TxProbe" WHERE id = 'a'`, []))[0]!["v"], "2");
+        }
+        finally
+        {
+            await session.Dispose();
+        }
+    });
+}

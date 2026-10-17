@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { DataSourceKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { DataSourceKind, WriteAtomicity, WriteConcurrency, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { ExternalRecord } from "@pragmatic-tech-ai/todl";
 import { AdapterPackError, AdapterPackErrorKind } from "../../adapter-pack-error.js";
 import type { InstalledPack } from "../../adapter-pack-installer.js";
@@ -111,6 +111,10 @@ test("Open + Query returns the pack's seeded records and Apply round-trips its W
         const factory = sandbox.Factory(DataSourceKind.Sql);
         const adapter = await factory.Open({ Kind: DataSourceKind.Sql, Config: {} });
 
+        // The example pack advertises no capabilities, so the proxy forwards the weakest guarantee.
+        assert.equal(adapter.CanTransact, false);
+        assert.equal(adapter.CanVersion, false);
+
         const records = await adapter.Query({ Source: SandboxFixture.WidgetsSource, Fields: [SandboxFixture.IdField, SandboxFixture.NameField] });
         assert.deepEqual(records, SandboxFixture.ExpectedWidgets);
 
@@ -118,6 +122,8 @@ test("Open + Query returns the pack's seeded records and Apply round-trips its W
         {
             Source: SandboxFixture.WidgetsSource,
             IdKey: SandboxFixture.IdField,
+            Concurrency: WriteConcurrency.LastWriteWins,
+            Atomicity: WriteAtomicity.Sequential,
             Operations: [{ Kind: WriteOperationKind.Upsert, Key: 1, Fields: { [SandboxFixture.NameField]: "gamma" } }]
         });
         assert.deepEqual(result, { Applied: 1, Failures: [] });
