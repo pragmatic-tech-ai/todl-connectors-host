@@ -50,6 +50,7 @@ class FakeSandbox implements IPackSandbox
 {
     public Disposed = false;
     public ThrowOnDispose = false;
+    public DisposeGate: Promise<void> | undefined;
 
     public Factory(kind: DataSourceKind): IDataSourceAdapterFactory
     {
@@ -58,6 +59,10 @@ class FakeSandbox implements IPackSandbox
 
     public async Dispose(): Promise<void>
     {
+        if (this.DisposeGate !== undefined)
+        {
+            await this.DisposeGate;
+        }
         this.Disposed = true;
         if (this.ThrowOnDispose)
         {
@@ -468,5 +473,35 @@ test("a GC failure never fails a resolve or an invalidate", async () =>
         assert.equal(factory.Kind, DataSourceKind.Sql);
         await provider.Invalidate("acme-pack");
         assert.ok(sandboxes.Sandboxes[0].Disposed);
+    }, { eviction: throwing });
+});
+
+test("a Resolve racing an Invalidate dispose leaves the re-created sandbox tracked", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        const spec = "acme-pack@^1";
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+        let release!: () => void;
+        sandboxes.Sandboxes[0].DisposeGate = new Promise<void>(r => { release = r; });
+        const invalidating = provider.Invalidate("acme-pack");
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+        assert.equal(sandboxes.Sandboxes.length, 2);
+        release();
+        await invalidating;
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
+        assert.ok(!sandboxes.Sandboxes[1].Disposed);
+        await provider.Invalidate("acme-pack");
+        assert.ok(sandboxes.Sandboxes[1].Disposed);
+    });
+});
+
+test("a swallowed GC failure does not swallow a real launch error", async () =>
+{
+    const throwing: CacheEvictionPolicy = { get MaxVersionsPerPack(): number { throw new Error("evict failed"); } };
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        sandboxes.FailNext = true;
+        await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" }), AdapterPackErrorKind.SandboxLaunchFailed);
     }, { eviction: throwing });
 });

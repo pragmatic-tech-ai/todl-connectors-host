@@ -75,20 +75,20 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
      */
     public async Invalidate(name: string): Promise<void>
     {
-        const roots = this.rootsByName.get(name);
-        if (roots !== undefined)
+        // Detach from the maps synchronously, before any await, so a concurrent Resolve that re-launches
+        // during the dispose awaits creates a fresh tracked entry that this call cannot clobber.
+        const launches: Promise<IPackSandbox>[] = [];
+        for (const root of this.rootsByName.get(name) ?? [])
         {
-            for (const root of roots)
+            const launch = this.launches.get(root);
+            this.launches.delete(root);
+            if (launch !== undefined)
             {
-                const launch = this.launches.get(root);
-                this.launches.delete(root);
-                if (launch !== undefined)
-                {
-                    await launch.then(s => s.Dispose(), () => undefined).catch(() => undefined);
-                }
+                launches.push(launch);
             }
-            this.rootsByName.delete(name);
         }
+        this.rootsByName.delete(name);
+        await Promise.all(launches.map(l => l.then(s => s.Dispose(), () => undefined).catch(() => undefined)));
         this.installer.Invalidate(name);
         await this.Gc();
     }
