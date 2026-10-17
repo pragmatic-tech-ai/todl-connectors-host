@@ -7,6 +7,7 @@ import { RestAdapterFactory } from "./rest/rest-adapter-factory.js";
 import type { IRestHttpClient } from "./rest/rest-http-client.js";
 import { CypherAdapterFactory } from "./cypher/cypher-adapter-factory.js";
 import { DocumentAdapterFactory } from "./document/document-adapter-factory.js";
+import { AdapterPackError, AdapterPackErrorKind } from "./provider-packs/adapter-pack-error.js";
 
 /** Optional injectable seams (tests inject fakes; production may inject a secret-resolving ConnectionResolver). */
 export interface ConnectorsHostOptions
@@ -23,6 +24,7 @@ export interface ConnectorsHostOptions
 export class ConnectorsHost
 {
     private static readonly ProviderDisposeFailed = "ConnectorsHost: provider dispose failed";
+    private static readonly NoProviderMessage = "no adapter pack provider is configured";
 
     public readonly Catalog: DataSourceAdapterCatalog;
 
@@ -56,33 +58,49 @@ export class ConnectorsHost
         return this;
     }
 
-    /** Hot-upgrade: asks the provider to drop its cached pack for `name`. No-op when there is no provider or it lacks Invalidate. */
+    /** Hot-upgrade: asks the provider to drop its cached pack for `name`. Throws ProviderNotConfigured when no capable pack provider is configured. */
     public async InvalidateProvider(name: string): Promise<void>
     {
         // The engine's provider type has no Invalidate; concrete providers (NpmAdapterPackProvider) do.
         const target = this.provider as { Invalidate?: (n: string) => Promise<void> } | undefined;
-        await target?.Invalidate?.(name);
+        if (target?.Invalidate === undefined)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.ProviderNotConfigured, ConnectorsHost.NoProviderMessage);
+        }
+        await target.Invalidate(name);
     }
 
-    /** Allows install scripts for a pack. No-op when there is no provider or it lacks AllowScripts. */
+    /** Allows install scripts for a pack. Throws ProviderNotConfigured when no capable pack provider is configured. */
     public async AllowPackScripts(name: string): Promise<void>
     {
         const target = this.provider as { AllowScripts?: (n: string) => Promise<void> } | undefined;
-        await target?.AllowScripts?.(name);
+        if (target?.AllowScripts === undefined)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.ProviderNotConfigured, ConnectorsHost.NoProviderMessage);
+        }
+        await target.AllowScripts(name);
     }
 
-    /** Revokes install scripts for a pack. No-op when there is no provider or it lacks DenyScripts. */
+    /** Revokes install scripts for a pack. Throws ProviderNotConfigured when no capable pack provider is configured. */
     public async DenyPackScripts(name: string): Promise<void>
     {
         const target = this.provider as { DenyScripts?: (n: string) => Promise<void> } | undefined;
-        await target?.DenyScripts?.(name);
+        if (target?.DenyScripts === undefined)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.ProviderNotConfigured, ConnectorsHost.NoProviderMessage);
+        }
+        await target.DenyScripts(name);
     }
 
-    /** Lists the pack names allowed to run install scripts. Empty when there is no provider or it lacks ListScriptAllowlist. */
+    /** Lists the pack names allowed to run install scripts. Throws ProviderNotConfigured when no capable pack provider is configured. */
     public async ListPackScriptAllowlist(): Promise<readonly string[]>
     {
         const target = this.provider as { ListScriptAllowlist?: () => Promise<readonly string[]> } | undefined;
-        return (await target?.ListScriptAllowlist?.()) ?? [];
+        if (target?.ListScriptAllowlist === undefined)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.ProviderNotConfigured, ConnectorsHost.NoProviderMessage);
+        }
+        return target.ListScriptAllowlist();
     }
 
     public async Dispose(): Promise<void>

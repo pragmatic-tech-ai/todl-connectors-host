@@ -15,7 +15,8 @@ export enum AdapterPackErrorKind
     ProviderNotAllowed = "provider-not-allowed",
     ProviderSpecInvalid = "provider-spec-invalid",
     ProviderDisposed = "provider-disposed",
-    SignatureCheckUnavailable = "signature-check-unavailable"
+    SignatureCheckUnavailable = "signature-check-unavailable",
+    ProviderNotConfigured = "provider-not-configured"
 }
 
 /** A typed failure raised while installing or reading an adapter pack. */

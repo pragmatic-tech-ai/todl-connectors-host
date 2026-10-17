@@ -181,23 +181,23 @@ test("InvalidateProvider forwards the pack name to the provider's Invalidate", a
     assert.deepEqual(seen, ["acme@^1"]);
 });
 
-test("InvalidateProvider tolerates a provider without Invalidate", async () =>
+test("InvalidateProvider rejects when the provider lacks Invalidate", async () =>
 {
     const plain: IDataSourceAdapterProvider = { Resolve: async () => { throw new Error("unused"); } };
-    await new ConnectorsHost({ provider: plain }).InvalidateProvider("acme@^1");
+    await assert.rejects(new ConnectorsHost({ provider: plain }).InvalidateProvider("acme@^1"), /no adapter pack provider is configured/);
 });
 
-test("InvalidateProvider tolerates a host with no provider", async () =>
+test("InvalidateProvider rejects on a host with no provider", async () =>
 {
-    await new ConnectorsHost().InvalidateProvider("acme@^1");
+    await assert.rejects(new ConnectorsHost().InvalidateProvider("acme@^1"), /no adapter pack provider is configured/);
 });
 
-test("script-allowlist passthroughs on a host with no provider are no-ops and list is empty", async () =>
+test("script-allowlist passthroughs on a host with no provider reject as not configured", async () =>
 {
     const host = new ConnectorsHost();
-    assert.deepEqual(await host.ListPackScriptAllowlist(), []);
-    await host.AllowPackScripts("acme");
-    await host.DenyPackScripts("acme");
+    await assert.rejects(host.ListPackScriptAllowlist(), /no adapter pack provider is configured/);
+    await assert.rejects(host.AllowPackScripts("acme"), /no adapter pack provider is configured/);
+    await assert.rejects(host.DenyPackScripts("acme"), /no adapter pack provider is configured/);
 });
 
 test("script-allowlist passthroughs forward to the provider", async () =>
