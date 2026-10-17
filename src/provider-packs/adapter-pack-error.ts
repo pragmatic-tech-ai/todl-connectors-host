@@ -6,7 +6,8 @@ export enum AdapterPackErrorKind
     ManifestMissing = "manifest-missing",
     ManifestInvalid = "manifest-invalid",
     AbiMismatch = "abi-mismatch",
-    InvalidName = "invalid-name"
+    InvalidName = "invalid-name",
+    SignatureInvalid = "signature-invalid"
 }
 
 /** A typed failure raised while installing or reading an adapter pack. */

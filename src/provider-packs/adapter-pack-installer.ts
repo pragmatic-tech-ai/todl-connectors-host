@@ -32,7 +32,7 @@ export class AdapterPackInstaller
     private readonly inFlight = new Map<string, Promise<InstalledPack>>();
     private readonly resolved = new Map<string, InstalledPack>();
 
-    public constructor(private readonly cacheDir: string, private readonly npm: INpmCli)
+    public constructor(private readonly cacheDir: string, private readonly npm: INpmCli, private readonly requireSignatures: boolean = false)
     {
     }
 
@@ -72,6 +72,10 @@ export class AdapterPackInstaller
             const installJson = { name: AdapterPackInstaller.InstallPackageName, private: true, dependencies: { [name]: range } };
             await writeFile(join(tmp, AdapterPackInstaller.PackageJsonName), JSON.stringify(installJson, null, 2));
             await this.npm.Install(tmp);
+            if (this.requireSignatures)
+            {
+                await this.npm.AuditSignatures(tmp);
+            }
             const version = await this.ReadLockedVersion(tmp, name);
             const tmpPackDir = join(tmp, AdapterPackInstaller.NodeModules, name);
             const tmpRead = await AdapterPackManifestReader.Read(tmpPackDir);

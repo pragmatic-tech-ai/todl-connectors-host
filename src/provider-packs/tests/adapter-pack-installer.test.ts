@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,8 @@ import type { INpmCli } from "../npm-cli.js";
 class FakeNpm implements INpmCli
 {
     public Installs = 0;
+    public Audits = 0;
+    public SignaturesValid = true;
 
     public constructor(
         private readonly name: string,
@@ -38,6 +40,15 @@ class FakeNpm implements INpmCli
         const lock = { lockfileVersion: 3, packages: { ["node_modules/" + this.name]: { version: this.version } } };
         writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
     }
+
+    public async AuditSignatures(_cwd: string): Promise<void>
+    {
+        this.Audits++;
+        if (!this.SignaturesValid)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.SignatureInvalid, "invalid signature");
+        }
+    }
 }
 
 class FlakyNpm implements INpmCli
@@ -56,6 +67,11 @@ class FlakyNpm implements INpmCli
             throw new Error("npm exploded");
         }
         await this.inner.Install(cwd);
+    }
+
+    public AuditSignatures(cwd: string): Promise<void>
+    {
+        return this.inner.AuditSignatures(cwd);
     }
 }
 
@@ -227,5 +243,43 @@ test("a manifest entry escaping the pack dir rejects with ManifestInvalid", asyn
         const installer = new AdapterPackInstaller(cacheDir, new FakeNpm(Env.PackName, "1.0.0", block));
         await assert.rejects(installer.Install(Env.PackName, "1.0.0"),
             (e: unknown) => e instanceof AdapterPackError && e.Kind === AdapterPackErrorKind.ManifestInvalid);
+    });
+});
+
+test("requireSignatures off: the audit is never called and an invalid pack still installs", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        npm.SignaturesValid = false;
+        const pack = await new AdapterPackInstaller(cacheDir, npm).Install(Env.PackName, "^1.0.0");
+        assert.equal(npm.Audits, 0);
+        assert.equal(pack.Version, "1.2.3");
+    });
+});
+
+test("requireSignatures on with a valid audit installs, audits once, and promotes the root", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const pack = await new AdapterPackInstaller(cacheDir, npm, true).Install(Env.PackName, "^1.0.0");
+        assert.equal(npm.Audits, 1);
+        assert.equal(pack.Root, join(cacheDir, Env.PackName, "1.2.3"));
+        assert.ok(existsSync(pack.Root));
+    });
+});
+
+test("requireSignatures on with an invalid audit rejects SignatureInvalid and promotes nothing", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        npm.SignaturesValid = false;
+        await assert.rejects(new AdapterPackInstaller(cacheDir, npm, true).Install(Env.PackName, "^1.0.0"),
+            (e: unknown) => e instanceof AdapterPackError && e.Kind === AdapterPackErrorKind.SignatureInvalid);
+        assert.equal(npm.Audits, 1);
+        assert.deepEqual(Env.TempDirs(cacheDir), []);
+        assert.equal(existsSync(join(cacheDir, Env.PackName, "1.2.3")), false);
     });
 });

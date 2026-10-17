@@ -3,10 +3,13 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js";
 
-/** Runs `npm install` against the package.json already written in a directory. */
+/** Runs npm against the package.json already written in a directory. */
 export interface INpmCli
 {
     Install(cwd: string): Promise<void>;
+
+    /** Resolves when registry signatures/provenance verify; rejects AdapterPackError(SignatureInvalid) otherwise. */
+    AuditSignatures(cwd: string): Promise<void>;
 }
 
 /** Production {@link INpmCli}: spawns the real `npm`. */
@@ -19,7 +22,10 @@ export class NpmCli implements INpmCli
     private static readonly DefaultTimeoutMs = 120000;
     private static readonly Stdio: ["ignore", "ignore", "pipe"] = ["ignore", "ignore", "pipe"];
     private static readonly KillSignal = "SIGKILL";
-    private static readonly Args: readonly string[] = ["install", "--no-audit", "--no-fund"];
+    private static readonly InstallArgs: readonly string[] = ["install", "--no-audit", "--no-fund"];
+    private static readonly AuditArgs: readonly string[] = ["audit", "signatures"];
+    private static readonly InstallLabel = "npm install";
+    private static readonly AuditLabel = "npm audit signatures";
     private static readonly StderrTailChars = 2000;
     private static readonly ErrorEvent = "error";
     private static readonly CloseEvent = "close";
@@ -52,17 +58,27 @@ export class NpmCli implements INpmCli
 
     public Install(cwd: string): Promise<void>
     {
+        return this.RunNpm(cwd, NpmCli.InstallArgs, NpmCli.InstallLabel, AdapterPackErrorKind.InstallFailed);
+    }
+
+    public AuditSignatures(cwd: string): Promise<void>
+    {
+        return this.RunNpm(cwd, NpmCli.AuditArgs, NpmCli.AuditLabel, AdapterPackErrorKind.SignatureInvalid);
+    }
+
+    private RunNpm(cwd: string, args: readonly string[], label: string, failure: AdapterPackErrorKind): Promise<void>
+    {
         return new Promise<void>((resolve, reject) =>
         {
             let stderr = "";
             const launch = NpmCli.ResolveLaunch();
             // Install/postinstall scripts run on the host at install time by design (mitigated upstream
             // by the provider allowlist + integrity verification), so --ignore-scripts is deliberately not set.
-            const child = spawn(launch.Command, [...launch.Prefix, ...NpmCli.Args], { cwd, env: process.env, stdio: NpmCli.Stdio });
+            const child = spawn(launch.Command, [...launch.Prefix, ...args], { cwd, env: process.env, stdio: NpmCli.Stdio });
             const timer = setTimeout(() =>
             {
                 child.kill(NpmCli.KillSignal);
-                reject(new AdapterPackError(AdapterPackErrorKind.InstallFailed, `npm install timed out after ${this.timeoutMs}ms in ${cwd}`));
+                reject(new AdapterPackError(failure, `${label} timed out after ${this.timeoutMs}ms in ${cwd}`));
             }, this.timeoutMs);
             child.stderr?.on(NpmCli.DataEvent, (chunk: Buffer) =>
             {
@@ -71,7 +87,7 @@ export class NpmCli implements INpmCli
             child.on(NpmCli.ErrorEvent, (err: Error) =>
             {
                 clearTimeout(timer);
-                reject(new AdapterPackError(AdapterPackErrorKind.InstallFailed, `npm install failed to start in ${cwd}: ${err.message}`));
+                reject(new AdapterPackError(failure, `${label} failed to start in ${cwd}: ${err.message}`));
             });
             child.on(NpmCli.CloseEvent, (code: number | null) =>
             {
@@ -82,7 +98,7 @@ export class NpmCli implements INpmCli
                     return;
                 }
                 const tail = stderr.slice(-NpmCli.StderrTailChars);
-                reject(new AdapterPackError(AdapterPackErrorKind.InstallFailed, `npm install exited ${code} in ${cwd}: ${tail}`));
+                reject(new AdapterPackError(failure, `${label} exited ${code} in ${cwd}: ${tail}`));
             });
         });
     }
