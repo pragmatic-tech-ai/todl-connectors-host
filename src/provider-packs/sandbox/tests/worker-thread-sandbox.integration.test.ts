@@ -84,11 +84,6 @@ class SandboxFixture
         return (err: unknown): boolean => err instanceof AdapterPackError && err.Kind === kind;
     }
 
-    public static HasAnyKind(...kinds: readonly AdapterPackErrorKind[]): (err: unknown) => boolean
-    {
-        return (err: unknown): boolean => err instanceof AdapterPackError && kinds.includes(err.Kind);
-    }
-
     /** Polls until the worker's exit event has propagated, or the deadline elapses. */
     public static async WaitUntilExited(sandbox: WorkerThreadSandbox, maxMs: number): Promise<void>
     {
@@ -269,9 +264,14 @@ test("a clean worker exit while idle marks the sandbox dead so later calls rejec
         await SandboxFixture.WaitUntilExited(sandbox as WorkerThreadSandbox, 5000);
         assert.ok((sandbox as WorkerThreadSandbox).HasExited, "worker should have exited cleanly");
 
+        // Require SandboxCrashed (the dead flag), never SandboxTimeout: an idle code-0 exit must
+        // mark the sandbox dead (finding 1) so the next Call rejects IMMEDIATELY. Accepting a
+        // timeout here would let a reverted finding 1 pass by falling through to callTimeoutMs.
+        const startedAt = Date.now();
         await assert.rejects(
             adapter.Query({ Source: SandboxFixture.WidgetsSource, Fields: [SandboxFixture.IdField] }),
-            SandboxFixture.HasAnyKind(AdapterPackErrorKind.SandboxCrashed, AdapterPackErrorKind.SandboxTimeout));
+            SandboxFixture.HasKind(AdapterPackErrorKind.SandboxCrashed));
+        assert.ok(Date.now() - startedAt < 1000, "later call must reject via the dead flag, not fall through to the 5000ms callTimeoutMs");
     }
     finally
     {
