@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { PackCache } from "../pack-cache.js";
 
@@ -277,5 +277,33 @@ test("Evict prunes an emptied name dir and an emptied scope dir, but keeps a sco
         assert.equal(existsSync(join(cacheDir, "@gone")), false);
         assert.equal(existsSync(join(cacheDir, "@kept", "p")), false);
         assert.equal(existsSync(survivor), true);
+    });
+});
+
+class PruningCache extends PackCache
+{
+    private pruned = false;
+
+    protected override async RenameTree(from: string, to: string): Promise<void>
+    {
+        if (!this.pruned)
+        {
+            this.pruned = true;
+            rmSync(dirname(to), { recursive: true, force: true });
+        }
+        await super.RenameTree(from, to);
+    }
+}
+
+test("Promote recreates a parent dir pruned just before the rename and still succeeds", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PruningCache(cacheDir);
+        const tmp = join(cacheDir, ".tmp-a");
+        Env.Seed(tmp, "first");
+        const root = cache.PathFor("@scope/p", "1.0.0");
+        assert.equal(await cache.Promote(tmp, root), true);
+        assert.equal(readFileSync(join(root, "marker.txt"), "utf8"), "first");
     });
 });

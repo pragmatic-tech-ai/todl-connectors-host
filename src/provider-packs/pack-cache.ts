@@ -15,6 +15,7 @@ export class PackCache
     private static readonly ScopePrefix = "@";
     private static readonly HiddenPrefix = ".";
     private static readonly Utf8 = "utf8";
+    private static readonly MissingParentCode = "ENOENT";
     private static readonly RaceCodes: readonly string[] = ["EEXIST", "ENOTEMPTY", "EPERM"];
 
     public constructor(private readonly cacheDir: string)
@@ -67,7 +68,7 @@ export class PackCache
             await this.Touch(tmp);
             try
             {
-                await rename(tmp, root);
+                await this.RenameWithParentRetry(tmp, root);
                 promoted = true;
             }
             catch (err)
@@ -84,6 +85,30 @@ export class PackCache
             await this.Touch(root);
         }
         return promoted;
+    }
+
+    /** Renames tmp to root; if the parent vanished under us (a concurrent empty-dir prune), recreates it and retries once. */
+    private async RenameWithParentRetry(tmp: string, root: string): Promise<void>
+    {
+        try
+        {
+            await this.RenameTree(tmp, root);
+        }
+        catch (err)
+        {
+            if ((err as NodeJS.ErrnoException).code !== PackCache.MissingParentCode)
+            {
+                throw err;
+            }
+            await mkdir(dirname(root), { recursive: true });
+            await this.RenameTree(tmp, root);
+        }
+    }
+
+    /** Moves a tree into place; overridable so tests can simulate the parent being pruned just before the rename. */
+    protected async RenameTree(from: string, to: string): Promise<void>
+    {
+        await rename(from, to);
     }
 
     /**
