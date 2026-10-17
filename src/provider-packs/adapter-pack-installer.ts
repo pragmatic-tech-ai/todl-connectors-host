@@ -4,6 +4,7 @@ import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js"
 import { AdapterPackManifestReader } from "./adapter-pack-manifest-reader.js";
 import type { INpmCli } from "./npm-cli.js";
 import { PackCache } from "./pack-cache.js";
+import type { ScriptAllowlist } from "./script-allowlist.js";
 
 /** An adapter pack resolved and installed on disk. */
 export interface InstalledPack
@@ -35,9 +36,24 @@ export class AdapterPackInstaller
 
     private readonly cache: PackCache;
 
-    public constructor(private readonly cacheDir: string, private readonly npm: INpmCli, private readonly requireSignatures: boolean = false)
+    public constructor(private readonly cacheDir: string, private readonly npm: INpmCli, private readonly requireSignatures: boolean = false, private readonly scripts?: ScriptAllowlist)
     {
         this.cache = new PackCache(cacheDir);
+    }
+
+    public async AllowScripts(name: string): Promise<void>
+    {
+        await this.scripts?.Allow(name);
+    }
+
+    public async DenyScripts(name: string): Promise<void>
+    {
+        await this.scripts?.Deny(name);
+    }
+
+    public async ListScriptAllowlist(): Promise<readonly string[]>
+    {
+        return (await this.scripts?.List()) ?? [];
     }
 
     public async Install(name: string, range: string): Promise<InstalledPack>
@@ -116,8 +132,17 @@ export class AdapterPackInstaller
         {
             const installJson = { name: AdapterPackInstaller.InstallPackageName, private: true, dependencies: { [name]: range } };
             await writeFile(join(tmp, AdapterPackInstaller.PackageJsonName), JSON.stringify(installJson, null, 2));
-            await this.npm.Install(tmp);
-            if (this.requireSignatures)
+            await this.npm.Install(tmp); // always --ignore-scripts (see NpmCli.InstallArgs)
+            // A throwing Has (unreadable or corrupt allowlist) propagates, so the install fails closed.
+            const allowScripts = (await this.scripts?.Has(name)) ?? false;
+            if (allowScripts)
+            {
+                // Signature-first: an allowlisted pack is about to run arbitrary code on the host, so its registry
+                // signature is verified NOW (mandatory, fail-closed) and the lifecycle scripts run only if it passes.
+                await this.npm.AuditSignatures(tmp);
+                await this.npm.RunInstallScripts(tmp);
+            }
+            else if (this.requireSignatures)
             {
                 await this.npm.AuditSignatures(tmp);
             }

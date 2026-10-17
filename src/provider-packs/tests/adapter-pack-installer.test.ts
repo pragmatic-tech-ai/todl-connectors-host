@@ -7,12 +7,14 @@ import { AdapterPackContract } from "@pragmatic-tech-ai/todl/adapter-pack";
 import { AdapterPackError, AdapterPackErrorKind } from "../adapter-pack-error.js";
 import { AdapterPackInstaller } from "../adapter-pack-installer.js";
 import type { INpmCli } from "../npm-cli.js";
+import { ScriptAllowlist } from "../script-allowlist.js";
 
 class FakeNpm implements INpmCli
 {
     public Installs = 0;
     public Audits = 0;
     public SignaturesValid = true;
+    public readonly Sequence: string[] = [];
 
     public constructor(
         private readonly name: string,
@@ -25,6 +27,7 @@ class FakeNpm implements INpmCli
     public async Install(cwd: string): Promise<void>
     {
         this.Installs++;
+        this.Sequence.push("install");
         if (this.delayMs > 0)
         {
             await new Promise<void>(r => setTimeout(r, this.delayMs));
@@ -43,11 +46,13 @@ class FakeNpm implements INpmCli
 
     public async RunInstallScripts(_cwd: string): Promise<void>
     {
+        this.Sequence.push("scripts");
     }
 
     public async AuditSignatures(_cwd: string): Promise<void>
     {
         this.Audits++;
+        this.Sequence.push("audit");
         if (!this.SignaturesValid)
         {
             throw new AdapterPackError(AdapterPackErrorKind.SignatureInvalid, "invalid signature");
@@ -365,6 +370,68 @@ test("requireSignatures on with an invalid audit rejects SignatureInvalid and pr
         await assert.rejects(new AdapterPackInstaller(cacheDir, npm, true).Install(Env.PackName, "^1.0.0"),
             (e: unknown) => e instanceof AdapterPackError && e.Kind === AdapterPackErrorKind.SignatureInvalid);
         assert.equal(npm.Audits, 1);
+        assert.deepEqual(Env.TempDirs(cacheDir), []);
+        assert.equal(existsSync(join(cacheDir, Env.PackName, "1.2.3")), false);
+    });
+});
+
+test("a pack not on the allowlist installs without audit or scripts when signatures are not required", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const scripts = new ScriptAllowlist(join(cacheDir, "allow.json"), []);
+        await new AdapterPackInstaller(cacheDir, npm, false, scripts).Install(Env.PackName, "^1.0.0");
+        assert.deepEqual(npm.Sequence, ["install"]);
+    });
+});
+
+test("a pack not on the allowlist is audited but never runs scripts when signatures are required", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const scripts = new ScriptAllowlist(join(cacheDir, "allow.json"), []);
+        await new AdapterPackInstaller(cacheDir, npm, true, scripts).Install(Env.PackName, "^1.0.0");
+        assert.deepEqual(npm.Sequence, ["install", "audit"]);
+    });
+});
+
+test("an allowlisted pack is audited before its scripts run", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const scripts = new ScriptAllowlist(join(cacheDir, "allow.json"), [Env.PackName]);
+        await new AdapterPackInstaller(cacheDir, npm, false, scripts).Install(Env.PackName, "^1.0.0");
+        assert.deepEqual(npm.Sequence, ["install", "audit", "scripts"]);
+    });
+});
+
+test("an allowlisted pack whose audit rejects never runs scripts", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        npm.SignaturesValid = false;
+        const scripts = new ScriptAllowlist(join(cacheDir, "allow.json"), [Env.PackName]);
+        await assert.rejects(new AdapterPackInstaller(cacheDir, npm, false, scripts).Install(Env.PackName, "^1.0.0"),
+            (e: unknown) => e instanceof AdapterPackError && e.Kind === AdapterPackErrorKind.SignatureInvalid);
+        assert.deepEqual(npm.Sequence, ["install", "audit"]);
+        assert.deepEqual(Env.TempDirs(cacheDir), []);
+    });
+});
+
+test("a corrupt allowlist file fails the install closed and never runs scripts", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const file = join(cacheDir, "allow.json");
+        writeFileSync(file, "{ not json");
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const scripts = new ScriptAllowlist(file, [Env.PackName]);
+        await assert.rejects(new AdapterPackInstaller(cacheDir, npm, false, scripts).Install(Env.PackName, "^1.0.0"));
+        assert.equal(npm.Sequence.includes("scripts"), false);
         assert.deepEqual(Env.TempDirs(cacheDir), []);
         assert.equal(existsSync(join(cacheDir, Env.PackName, "1.2.3")), false);
     });
