@@ -54,6 +54,14 @@ export class ConnectorsHost
         return this;
     }
 
+    /** Hot-upgrade: asks the provider to drop its cached pack for `name`. No-op when there is no provider or it lacks Invalidate. */
+    public async InvalidateProvider(name: string): Promise<void>
+    {
+        // The engine's provider type has no Invalidate; concrete providers (NpmAdapterPackProvider) do.
+        const target = this.provider as { Invalidate?: (n: string) => Promise<void> } | undefined;
+        await target?.Invalidate?.(name);
+    }
+
     public async Dispose(): Promise<void>
     {
         await this.Catalog.Dispose();

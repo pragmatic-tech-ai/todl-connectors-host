@@ -134,3 +134,22 @@ test("host Dispose swallows a provider Dispose rejection", async () =>
     const failing = { Resolve: async () => { throw new Error("unused"); }, Dispose: async () => { throw new Error("boom"); } };
     await new ConnectorsHost({ provider: failing as IDataSourceAdapterProvider }).Dispose();
 });
+
+test("InvalidateProvider forwards the pack name to the provider's Invalidate", async () =>
+{
+    const seen: string[] = [];
+    const provider = { Resolve: async () => { throw new Error("unused"); }, Invalidate: async (n: string) => { seen.push(n); } };
+    await new ConnectorsHost({ provider: provider as IDataSourceAdapterProvider }).InvalidateProvider("acme@^1");
+    assert.deepEqual(seen, ["acme@^1"]);
+});
+
+test("InvalidateProvider tolerates a provider without Invalidate", async () =>
+{
+    const plain: IDataSourceAdapterProvider = { Resolve: async () => { throw new Error("unused"); } };
+    await new ConnectorsHost({ provider: plain }).InvalidateProvider("acme@^1");
+});
+
+test("InvalidateProvider tolerates a host with no provider", async () =>
+{
+    await new ConnectorsHost().InvalidateProvider("acme@^1");
+});
