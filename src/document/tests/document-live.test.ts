@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
-import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { DocumentAdapter } from "../document-adapter.js";
-import type { IDocumentSession } from "../document-session.js";
+import type { IDocumentSession, VersionState } from "../document-session.js";
 import { DocumentConnectionConfig, MongoDocumentSession } from "../mongo-document-session.js";
 import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
 
@@ -38,10 +38,10 @@ class SeedingDocumentSession implements IDocumentSession
         return this.inner.Delete(collection, idField, key);
     }
 
-    public async ReadVersion(collection: string, idField: string, key: unknown): Promise<unknown>
+    public async ReadVersionState(source: string, idKey: string, key: ExternalFieldValue): Promise<VersionState>
     {
         await this.EnsureSeeded();
-        return this.inner.ReadVersion(collection, idField, key);
+        return this.inner.ReadVersionState(source, idKey, key);
     }
 
     public async Dispose(): Promise<void>

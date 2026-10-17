@@ -1,4 +1,5 @@
-import type { IDocumentSession } from "../document/document-session.js";
+import type { ExternalFieldValue } from "@pragmatic-tech-ai/todl";
+import type { IDocumentSession, VersionState } from "../document/document-session.js";
 
 /** In-memory document store. Find ignores the filter and returns every doc (the adapter re-filters). */
 export class FakeDocumentSession implements IDocumentSession
@@ -6,7 +7,7 @@ export class FakeDocumentSession implements IDocumentSession
     private static readonly VersionProperty = "rev";
     private static readonly IdProperty = "id";
 
-    private readonly store = new Map<string, Map<string, Record<string, unknown>>>();
+    protected readonly store = new Map<string, Map<string, Record<string, unknown>>>();
 
     public Seed(collection: string, docs: Record<string, unknown>[]): this
     {
@@ -36,8 +37,57 @@ export class FakeDocumentSession implements IDocumentSession
         return this.store.get(collection)?.delete(String(key)) ?? false;
     }
 
-    public async ReadVersion(collection: string, _idField: string, key: unknown): Promise<unknown>
+    public async ReadVersionState(source: string, _idKey: string, key: ExternalFieldValue): Promise<VersionState>
     {
-        return this.store.get(collection)?.get(String(key))?.[FakeDocumentSession.VersionProperty] ?? null;
+        const doc = this.store.get(source)?.get(String(key));
+        if (doc === undefined)
+        {
+            return { Exists: false };
+        }
+        return { Exists: true, Version: (doc[FakeDocumentSession.VersionProperty] ?? null) as ExternalFieldValue | null };
+    }
+
+    /** Deep-copies the store so a transaction can roll back to this point. */
+    protected Snapshot(): Map<string, Map<string, Record<string, unknown>>>
+    {
+        const copy = new Map<string, Map<string, Record<string, unknown>>>();
+        for (const [collection, bucket] of this.store)
+        {
+            const clone = new Map<string, Record<string, unknown>>();
+            for (const [key, doc] of bucket)
+            {
+                clone.set(key, { ...doc });
+            }
+            copy.set(collection, clone);
+        }
+        return copy;
+    }
+
+    /** Replaces the live store with a prior snapshot (rollback). */
+    protected Restore(snapshot: Map<string, Map<string, Record<string, unknown>>>): void
+    {
+        this.store.clear();
+        for (const [collection, bucket] of snapshot)
+        {
+            this.store.set(collection, bucket);
+        }
+    }
+}
+
+/** A fake that CAN transact: runs work against itself, restoring the pre-transaction snapshot if it throws. */
+export class TransactionalFakeDocumentSession extends FakeDocumentSession
+{
+    public async Transaction<T>(work: (tx: IDocumentSession) => Promise<T>): Promise<T>
+    {
+        const snapshot = this.Snapshot();
+        try
+        {
+            return await work(this);
+        }
+        catch (error)
+        {
+            this.Restore(snapshot);
+            throw error;
+        }
     }
 }
