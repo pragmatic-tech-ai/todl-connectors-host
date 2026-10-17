@@ -41,9 +41,8 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
     private static readonly BadSpecMessage = "invalid adapter pack provider spec";
     private static readonly DisposedMessage = "npm adapter pack provider is disposed";
     private static readonly LatestRange = "latest";
-    private static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
     /** Registry semver version/range or dist-tag characters only: no ":" or "/" so no url/file/git/alias specifiers. */
-    private static readonly RangePattern = /^[A-Za-z0-9.+^~<>=*| -]+$/;
+    private static readonly RangePattern = /^[A-Za-z0-9*^~<>=][A-Za-z0-9.+^~<>=*| -]*$/;
     private static readonly ParentSegment = "..";
 
     private readonly installer: AdapterPackInstaller;
@@ -98,7 +97,7 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         const name = hasRange ? provider.slice(0, at) : provider;
         const range = hasRange ? provider.slice(at + 1) : NpmAdapterPackProvider.LatestRange;
         const badRange = !NpmAdapterPackProvider.RangePattern.test(range) || range.includes(NpmAdapterPackProvider.ParentSegment);
-        if (!NpmAdapterPackProvider.NamePattern.test(name) || badRange)
+        if (!AdapterPackInstaller.NamePattern.test(name) || badRange)
         {
             throw new AdapterPackError(AdapterPackErrorKind.ProviderSpecInvalid, NpmAdapterPackProvider.BadSpecMessage);
         }

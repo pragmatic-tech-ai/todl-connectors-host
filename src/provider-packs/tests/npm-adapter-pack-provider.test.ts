@@ -18,10 +18,15 @@ class FakeNpm implements INpmCli
     public Installs = 0;
     public Audits = 0;
     public Versions: Record<string, string> = {};
+    public InstallGate: Promise<void> | undefined;
 
     public async Install(cwd: string): Promise<void>
     {
         this.Installs++;
+        if (this.InstallGate !== undefined)
+        {
+            await this.InstallGate;
+        }
         const json = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as { dependencies: Record<string, string> };
         const name = Object.keys(json.dependencies)[0];
         const version = this.Versions[json.dependencies[name]] ?? "1.0.0";
@@ -275,7 +280,7 @@ test("non-registry specifiers are rejected even when the bare name is allowliste
 {
     await Env.With(async (provider, npm, sandboxes) =>
     {
-        for (const spec of ["acme-pack@file:./p", "acme-pack@https://h/p.tgz", "acme-pack@github:u/r", "acme-pack@git+ssh://h/r", "acme-pack@npm:evil@1", "acme-pack@../x"])
+        for (const spec of ["acme-pack@file:./p", "acme-pack@https://h/p.tgz", "acme-pack@github:u/r", "acme-pack@git+ssh://h/r", "acme-pack@npm:evil@1", "acme-pack@../x", "acme-pack@.", "acme-pack@.x"])
         {
             await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec }), AdapterPackErrorKind.ProviderSpecInvalid);
         }
@@ -288,7 +293,7 @@ test("malformed names are rejected", async () =>
 {
     await Env.With(async (provider, npm) =>
     {
-        for (const spec of ["@scope/", "@scope/@1", "a/b@1", "a@b@1", "@/x@1"])
+        for (const spec of ["@scope/", "@scope/@1", "a/b@1", "a@b@1", "@/x@1", "A@1"])
         {
             await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec }), AdapterPackErrorKind.ProviderSpecInvalid);
         }
@@ -340,5 +345,39 @@ test("a sandbox that finishes launching after Dispose is torn down and the resol
         await settled;
         assert.equal(sandboxes.Sandboxes.length, 1);
         assert.ok(sandboxes.Sandboxes[0].Disposed);
+    });
+});
+
+test("valid names (underscore) and legitimate semver ranges are admitted", async () =>
+{
+    await Env.With(async (provider, npm, sandboxes) =>
+    {
+        const specs = ["some_pack@^1", "acme-pack@^1.2.3", "acme-pack@>=1 <2", "acme-pack@1.x", "acme-pack@*", "acme-pack@latest", "acme-pack@1.2.3-beta.1"];
+        for (const spec of specs)
+        {
+            const factory = await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+            assert.equal(factory.Kind, DataSourceKind.Sql);
+        }
+        assert.equal(npm.Installs, specs.length);
+        assert.ok(sandboxes.Launches >= 1);
+    }, { providerAllowlist: ["some_pack", "acme-pack"] });
+});
+
+test("Dispose during Install rejects the resolve and launches nothing", async () =>
+{
+    await Env.With(async (provider, npm, sandboxes) =>
+    {
+        let release!: () => void;
+        npm.InstallGate = new Promise<void>(r => { release = r; });
+        const pending = provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        const settled = assert.rejects(pending, AdapterPackError);
+        while (npm.Installs === 0)
+        {
+            await new Promise<void>(r => setTimeout(r, 5));
+        }
+        await provider.Dispose();
+        release();
+        await settled;
+        assert.equal(sandboxes.Launches, 0);
     });
 });

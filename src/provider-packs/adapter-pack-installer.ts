@@ -25,7 +25,7 @@ export class AdapterPackInstaller
     private static readonly InstallPackageName = "adapter-pack-install";
     private static readonly LockPackagesPrefix = "node_modules/";
     private static readonly Utf8 = "utf8";
-    private static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+    public static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
     private static readonly MaxNameLength = 214;
     private static readonly ParentSegment = "..";
     private static readonly SpecSeparator = "@";
