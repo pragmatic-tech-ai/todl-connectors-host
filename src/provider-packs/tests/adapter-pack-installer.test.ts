@@ -41,6 +41,10 @@ class FakeNpm implements INpmCli
         writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
     }
 
+    public async RunInstallScripts(_cwd: string): Promise<void>
+    {
+    }
+
     public async AuditSignatures(_cwd: string): Promise<void>
     {
         this.Audits++;
@@ -67,6 +71,11 @@ class FlakyNpm implements INpmCli
             throw new Error("npm exploded");
         }
         await this.inner.Install(cwd);
+    }
+
+    public RunInstallScripts(cwd: string): Promise<void>
+    {
+        return this.inner.RunInstallScripts(cwd);
     }
 
     public AuditSignatures(cwd: string): Promise<void>
@@ -179,6 +188,10 @@ class RoutingNpm implements INpmCli
         const json = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8"));
         const name = Object.keys(json.dependencies)[0];
         await this.byName.get(name)!.Install(cwd);
+    }
+
+    public async RunInstallScripts(_cwd: string): Promise<void>
+    {
     }
 
     public async AuditSignatures(_cwd: string): Promise<void>

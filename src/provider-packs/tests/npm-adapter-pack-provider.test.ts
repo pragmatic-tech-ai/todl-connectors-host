@@ -40,6 +40,10 @@ class FakeNpm implements INpmCli
         writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
     }
 
+    public async RunInstallScripts(_cwd: string): Promise<void>
+    {
+    }
+
     public async AuditSignatures(_cwd: string): Promise<void>
     {
         this.Audits++;

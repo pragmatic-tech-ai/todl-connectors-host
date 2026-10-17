@@ -6,7 +6,11 @@ import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js"
 /** Runs npm against the package.json already written in a directory. */
 export interface INpmCli
 {
+    /** Installs the tree with --ignore-scripts: no lifecycle script runs here. */
     Install(cwd: string): Promise<void>;
+
+    /** Runs the install lifecycle scripts of the already-installed tree (npm rebuild); used only after signatures verify. */
+    RunInstallScripts(cwd: string): Promise<void>;
 
     /** Resolves when registry signatures/provenance verify; rejects AdapterPackError(SignatureInvalid) otherwise. */
     AuditSignatures(cwd: string): Promise<void>;
@@ -24,9 +28,11 @@ export class NpmCli implements INpmCli
     private static readonly DefaultTimeoutMs = 120000;
     private static readonly Stdio: ["ignore", "pipe", "pipe"] = ["ignore", "pipe", "pipe"];
     private static readonly KillSignal = "SIGKILL";
-    private static readonly InstallArgs: readonly string[] = ["install", "--no-audit", "--no-fund"];
+    public static readonly InstallArgs: readonly string[] = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
+    public static readonly RebuildArgs: readonly string[] = ["rebuild"];
     private static readonly AuditArgs: readonly string[] = ["audit", "signatures"];
     private static readonly InstallLabel = "npm install";
+    private static readonly RebuildLabel = "npm rebuild";
     private static readonly AuditLabel = "npm audit signatures";
     private static readonly OutputTailChars = 2000;
     private static readonly ErrorEvent = "error";
@@ -76,6 +82,11 @@ export class NpmCli implements INpmCli
         return this.RunNpm(cwd, NpmCli.InstallArgs, NpmCli.InstallLabel, AdapterPackErrorKind.InstallFailed, () => AdapterPackErrorKind.InstallFailed);
     }
 
+    public RunInstallScripts(cwd: string): Promise<void>
+    {
+        return this.RunNpm(cwd, NpmCli.RebuildArgs, NpmCli.RebuildLabel, AdapterPackErrorKind.InstallFailed, () => AdapterPackErrorKind.InstallFailed);
+    }
+
     public AuditSignatures(cwd: string): Promise<void>
     {
         return this.RunNpm(cwd, NpmCli.AuditArgs, NpmCli.AuditLabel, AdapterPackErrorKind.SignatureCheckUnavailable, NpmCli.ClassifyAuditFailure);
@@ -113,8 +124,9 @@ export class NpmCli implements INpmCli
             let stderr = "";
             const launch = NpmCli.ResolveLaunch();
             const launched = [launch.Command, ...launch.Prefix].join(NpmCli.LaunchSeparator);
-            // Install/postinstall scripts run on the host at install time by design (mitigated upstream
-            // by the provider allowlist + integrity verification), so --ignore-scripts is deliberately not set.
+            // Install runs with --ignore-scripts (see InstallArgs); lifecycle scripts run only via RunInstallScripts,
+            // and only for packs the operator put on the script allowlist, after their signature verifies. env is the
+            // host env: trusted (allowlisted) packs' scripts run with it by the operator's explicit choice.
             const child = spawn(launch.Command, [...launch.Prefix, ...args], { cwd, env: process.env, stdio: NpmCli.Stdio });
             const timer = setTimeout(() =>
             {
