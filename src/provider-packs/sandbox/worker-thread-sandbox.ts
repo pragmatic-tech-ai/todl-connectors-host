@@ -50,30 +50,7 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
         return new Promise<IPackSandbox>((resolve, reject) =>
         {
             let settled = false;
-            const timer = setTimeout(() =>
-            {
-                fail(WorkerThreadSandboxFactory.LaunchTimeoutError);
-            }, startupTimeoutMs);
-            timer.unref();
-            const cleanup = (): void =>
-            {
-                clearTimeout(timer);
-                worker.removeAllListeners();
-            };
-            const fail = (reason: string): void =>
-            {
-                if (settled)
-                {
-                    return;
-                }
-                settled = true;
-                cleanup();
-                void worker.terminate().finally(() =>
-                {
-                    reject(new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, reason));
-                });
-            };
-            worker.on("message", (msg: { ready?: boolean; error?: string }) =>
+            const onMessage = (msg: { ready?: boolean; error?: string }): void =>
             {
                 if (settled)
                 {
@@ -82,22 +59,52 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
                 if (msg.ready === true)
                 {
                     settled = true;
-                    cleanup();
+                    detach();
                     resolve(new WorkerThreadSandbox(worker, options));
                 }
                 else
                 {
                     fail(msg.error ?? WorkerThreadSandboxFactory.MissingErrorText);
                 }
-            });
-            worker.on("error", (err: Error) =>
+            };
+            const onError = (err: Error): void =>
             {
                 fail(err.message);
-            });
-            worker.on("exit", (code: number) =>
+            };
+            const onExit = (code: number): void =>
             {
                 fail(`${WorkerThreadSandboxFactory.EarlyExitError} (code ${code})`);
-            });
+            };
+            const timer = setTimeout(() =>
+            {
+                fail(WorkerThreadSandboxFactory.LaunchTimeoutError);
+            }, startupTimeoutMs);
+            timer.unref();
+            // Remove only our own launch listeners by reference; Worker.removeAllListeners() would
+            // also strip Node's internal port-forwarding listeners and silence the live sandbox.
+            const detach = (): void =>
+            {
+                clearTimeout(timer);
+                worker.off("message", onMessage);
+                worker.off("error", onError);
+                worker.off("exit", onExit);
+            };
+            const fail = (reason: string): void =>
+            {
+                if (settled)
+                {
+                    return;
+                }
+                settled = true;
+                detach();
+                void worker.terminate().finally(() =>
+                {
+                    reject(new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, reason));
+                });
+            };
+            worker.on("message", onMessage);
+            worker.on("error", onError);
+            worker.on("exit", onExit);
         });
     }
 }
