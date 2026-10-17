@@ -17,6 +17,14 @@ interface PendingCall
     timer?: NodeJS.Timeout;
 }
 
+/** The `Worker` EventEmitter event names the launcher and the sandbox subscribe to. */
+class WorkerEvents
+{
+    public static readonly Message = "message";
+    public static readonly Error = "error";
+    public static readonly Exit = "exit";
+}
+
 /** Launches packs into a `worker_threads` Worker: the entry resolves relative to this module, with
  *  `--import tsx` only when the resolved entry is a `.ts` file (a dist `.js` entry needs none). */
 export class WorkerThreadSandboxFactory implements IPackSandboxFactory
@@ -56,7 +64,7 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
                 {
                     return;
                 }
-                if (msg.ready === true)
+                if (msg !== null && typeof msg === "object" && msg.ready === true)
                 {
                     settled = true;
                     detach();
@@ -64,7 +72,7 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
                 }
                 else
                 {
-                    fail(msg.error ?? WorkerThreadSandboxFactory.MissingErrorText);
+                    fail(msg?.error ?? WorkerThreadSandboxFactory.MissingErrorText);
                 }
             };
             const onError = (err: Error): void =>
@@ -85,9 +93,9 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
             const detach = (): void =>
             {
                 clearTimeout(timer);
-                worker.off("message", onMessage);
-                worker.off("error", onError);
-                worker.off("exit", onExit);
+                worker.off(WorkerEvents.Message, onMessage);
+                worker.off(WorkerEvents.Error, onError);
+                worker.off(WorkerEvents.Exit, onExit);
             };
             const fail = (reason: string): void =>
             {
@@ -97,14 +105,22 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
                 }
                 settled = true;
                 detach();
-                void worker.terminate().finally(() =>
+                // Keep a no-op "error" listener until the worker exits: a late "error" emitted while
+                // terminate() is in flight would otherwise be unhandled and crash the host.
+                const swallow = (): void =>
                 {
-                    reject(new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, reason));
+                };
+                worker.on(WorkerEvents.Error, swallow);
+                worker.once(WorkerEvents.Exit, () =>
+                {
+                    worker.off(WorkerEvents.Error, swallow);
                 });
+                const error = new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, reason);
+                worker.terminate().then(() => reject(error), () => reject(error));
             };
-            worker.on("message", onMessage);
-            worker.on("error", onError);
-            worker.on("exit", onExit);
+            worker.on(WorkerEvents.Message, onMessage);
+            worker.on(WorkerEvents.Error, onError);
+            worker.on(WorkerEvents.Exit, onExit);
         });
     }
 }
@@ -115,25 +131,35 @@ export class WorkerThreadSandbox implements IPackSandbox
 {
     private static readonly DeadError = "pack sandbox is no longer running";
     private static readonly CrashReason = "pack worker crashed";
+    private static readonly CleanExitReason = "pack worker exited";
     private static readonly DisposedReason = "pack sandbox was disposed";
     private static readonly CallTimeoutReason = "pack worker call timed out";
-    private static readonly CleanExitCode = 0;
+    private static readonly CallFailedReason = "pack worker call failed";
+    private static readonly DefaultCallTimeoutMs = 30000;
 
     private readonly pending = new Map<number, PendingCall>();
     private nextId = 1;
     private dead = false;
     private disposed = false;
+    private exited = false;
 
     public constructor(private readonly worker: Worker, private readonly options: PackSandboxOptions)
     {
-        this.worker.on("message", this.OnMessage);
-        this.worker.on("error", this.OnError);
-        this.worker.on("exit", this.OnExit);
+        this.worker.on(WorkerEvents.Message, this.OnMessage);
+        this.worker.on(WorkerEvents.Error, this.OnError);
+        this.worker.on(WorkerEvents.Exit, this.OnExit);
     }
 
     public Factory(kind: DataSourceKind): IDataSourceAdapterFactory
     {
         return new WorkerProxyFactory(this, kind);
+    }
+
+    /** Whether the underlying worker's `exit` event has fired (terminated or self-exited). Lets a
+     *  caller confirm the worker is truly gone rather than merely flagged dead. */
+    public get HasExited(): boolean
+    {
+        return this.exited;
     }
 
     public async Dispose(): Promise<void>
@@ -159,32 +185,49 @@ export class WorkerThreadSandbox implements IPackSandbox
         return new Promise<PackWorkerResponse>((resolve, reject) =>
         {
             const entry: PendingCall = { resolve, reject };
-            const timeoutMs = this.options.callTimeoutMs;
-            if (timeoutMs !== undefined && timeoutMs > 0)
+            const timeoutMs = this.options.callTimeoutMs ?? WorkerThreadSandbox.DefaultCallTimeoutMs;
+            if (timeoutMs > 0)
             {
                 entry.timer = setTimeout(() =>
                 {
                     this.pending.delete(id);
-                    reject(new AdapterPackError(AdapterPackErrorKind.SandboxCrashed, WorkerThreadSandbox.CallTimeoutReason));
+                    reject(new AdapterPackError(AdapterPackErrorKind.SandboxTimeout, WorkerThreadSandbox.CallTimeoutReason));
                 }, timeoutMs);
                 entry.timer.unref();
             }
             this.pending.set(id, entry);
-            this.worker.postMessage({ id, op, ...fields });
+            try
+            {
+                this.worker.postMessage({ id, op, ...fields });
+            }
+            catch (err)
+            {
+                this.pending.delete(id);
+                if (entry.timer !== undefined)
+                {
+                    clearTimeout(entry.timer);
+                }
+                reject(new AdapterPackError(AdapterPackErrorKind.PackCallFailed, `${WorkerThreadSandbox.CallFailedReason}: ${(err as Error).message}`));
+            }
         });
     }
 
-    /** Throws the proxy-side typed error carried by an `ok:false` response. */
+    /** Throws the proxy-side typed error carried by an `ok:false` response. The sandbox is still
+     *  live (the pack rejected or could not serve the call), so this is never `SandboxCrashed`. */
     public static EnsureOk(response: PackWorkerResponse): void
     {
         if (!response.ok)
         {
-            throw new AdapterPackError(AdapterPackErrorKind.SandboxCrashed, response.error ?? WorkerThreadSandbox.CrashReason);
+            throw new AdapterPackError(AdapterPackErrorKind.PackCallFailed, response.error ?? WorkerThreadSandbox.CallFailedReason);
         }
     }
 
     private readonly OnMessage = (response: PackWorkerResponse): void =>
     {
+        if (response === null || typeof response !== "object" || typeof response.id !== "number")
+        {
+            return;
+        }
         const entry = this.pending.get(response.id);
         if (entry === undefined)
         {
@@ -200,19 +243,19 @@ export class WorkerThreadSandbox implements IPackSandbox
 
     private readonly OnError = (err: Error): void =>
     {
-        this.MarkDead(err.message);
+        this.MarkDead(`${WorkerThreadSandbox.CrashReason}: ${err.message}`);
     };
 
+    // Any exit of a sandbox we did not dispose is fatal: a later Call would otherwise register a
+    // pending entry and postMessage into a dead worker, dropping the message and hanging forever.
     private readonly OnExit = (code: number): void =>
     {
+        this.exited = true;
         if (this.disposed)
         {
             return;
         }
-        if (code !== WorkerThreadSandbox.CleanExitCode || this.pending.size > 0)
-        {
-            this.MarkDead(`${WorkerThreadSandbox.CrashReason} (exit code ${code})`);
-        }
+        this.MarkDead(`${WorkerThreadSandbox.CleanExitReason} (exit code ${code})`);
     };
 
     private MarkDead(reason: string): void

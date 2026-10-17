@@ -17,6 +17,8 @@ export class ExampleSqlAdapter implements IDataSourceAdapter
     private static readonly SqlKind = "sql";
     private static readonly WidgetsSource = "widgets";
     private static readonly CrashSource = "__crash__";
+    private static readonly HangSource = "__hang__";
+    private static readonly Exit0Source = "__exit0__";
     private static readonly Seed: Record<string, readonly ExternalRecord[]> =
     {
         [ExampleSqlAdapter.WidgetsSource]:
@@ -36,6 +38,20 @@ export class ExampleSqlAdapter implements IDataSourceAdapter
         if (request.Source === ExampleSqlAdapter.CrashSource)
         {
             process.exit(1);
+        }
+        if (request.Source === ExampleSqlAdapter.HangSource)
+        {
+            // Never resolves: drives the host-side call-timeout path.
+            return new Promise<readonly ExternalRecord[]>(() =>
+            {
+            });
+        }
+        if (request.Source === ExampleSqlAdapter.Exit0Source)
+        {
+            // Respond normally, then let the worker self-exit cleanly on the next tick so the host
+            // observes a code-0 exit while idle.
+            setTimeout(() => process.exit(0), 0);
+            return [];
         }
         return ExampleSqlAdapter.Seed[request.Source] ?? [];
     }

@@ -50,7 +50,7 @@ export class AdapterPackHost
             port.postMessage(AdapterPackHost.Failed(AdapterPackHost.MissingEntryError));
             return;
         }
-        let pack: IAdapterPack;
+        let factories: readonly IDataSourceAdapterFactory[];
         try
         {
             const mod = await import(pathToFileURL(entry).href);
@@ -60,14 +60,16 @@ export class AdapterPackHost
                 port.postMessage(AdapterPackHost.Failed(AdapterPackHost.NotAPackError));
                 return;
             }
-            pack = candidate as IAdapterPack;
+            // Call Factories() inside the try so a throwing pack posts a proper PackWorkerFailed
+            // message rather than failing Launch only incidentally via the worker "error" event.
+            factories = (candidate as IAdapterPack).Factories();
         }
         catch (err)
         {
             port.postMessage(AdapterPackHost.Failed(AdapterPackHost.Describe(err)));
             return;
         }
-        const host = new AdapterPackHost(port, pack.Factories());
+        const host = new AdapterPackHost(port, factories);
         port.on("message", (req: PackWorkerRequest) =>
         {
             void host.Handle(req);

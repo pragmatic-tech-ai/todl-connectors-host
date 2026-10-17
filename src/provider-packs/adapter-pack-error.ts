@@ -9,7 +9,9 @@ export enum AdapterPackErrorKind
     InvalidName = "invalid-name",
     SignatureInvalid = "signature-invalid",
     SandboxLaunchFailed = "sandbox-launch-failed",
-    SandboxCrashed = "sandbox-crashed"
+    SandboxCrashed = "sandbox-crashed",
+    PackCallFailed = "pack-call-failed",
+    SandboxTimeout = "sandbox-timeout"
 }
 
 /** A typed failure raised while installing or reading an adapter pack. */

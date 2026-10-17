@@ -5,6 +5,8 @@ export class ExampleSqlAdapter {
     static SqlKind = "sql";
     static WidgetsSource = "widgets";
     static CrashSource = "__crash__";
+    static HangSource = "__hang__";
+    static Exit0Source = "__exit0__";
     static Seed = {
         [ExampleSqlAdapter.WidgetsSource]: [
             { id: 1, name: "alpha" },
@@ -17,6 +19,17 @@ export class ExampleSqlAdapter {
     async Query(request) {
         if (request.Source === ExampleSqlAdapter.CrashSource) {
             process.exit(1);
+        }
+        if (request.Source === ExampleSqlAdapter.HangSource) {
+            // Never resolves: drives the host-side call-timeout path.
+            return new Promise(() => {
+            });
+        }
+        if (request.Source === ExampleSqlAdapter.Exit0Source) {
+            // Respond normally, then let the worker self-exit cleanly on the next tick so the host
+            // observes a code-0 exit while idle.
+            setTimeout(() => process.exit(0), 0);
+            return [];
         }
         return ExampleSqlAdapter.Seed[request.Source] ?? [];
     }
