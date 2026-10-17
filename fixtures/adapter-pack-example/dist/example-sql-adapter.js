@@ -47,7 +47,7 @@ export class ExampleSqlAdapter {
         return ExampleSqlAdapter.Seed[request.Source] ?? [];
     }
     async Apply(batch) {
-        return { Applied: batch.Operations.length, Conflicts: [] };
+        return { Applied: batch.Operations.length, Failures: [] };
     }
     async Dispose() {
     }

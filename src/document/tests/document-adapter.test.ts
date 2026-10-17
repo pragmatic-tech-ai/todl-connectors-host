@@ -45,7 +45,7 @@ test("an optimistic version mismatch is a conflict, not applied, never thrown", 
     const result = await new DocumentAdapter(session).Apply({ Source: DocumentFixture.Collection, IdKey: DocumentFixture.IdField, VersionField: DocumentFixture.Rev,
         Operations: [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { [DocumentFixture.Label]: "x" }, Version: "stale" }] });
     assert.equal(result.Applied, 0);
-    assert.match(result.Conflicts[0]!.Reason, /version/);
+    assert.match(result.Failures[0]!.Reason, /version/);
 });
 
 test("an upsert with an operator-prefixed field key is rejected", async () =>

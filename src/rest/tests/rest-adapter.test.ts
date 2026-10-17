@@ -48,8 +48,8 @@ test("a 409 on an optimistic upsert is a conflict, not applied, never thrown", a
     const result = await adapter.Apply({ Source: Customer, IdKey: "id", VersionField: "rev",
         Operations: [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" }, Version: "stale" }] });
     assert.equal(result.Applied, 0);
-    assert.equal(result.Conflicts.length, 1);
-    assert.equal(result.Conflicts[0]!.Key, "c1");
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Key, "c1");
 });
 
 class RestFailureFixture
@@ -84,14 +84,14 @@ test("a 412 on an optimistic upsert is a conflict, not applied, not thrown", asy
 {
     const result = await RestFailureFixture.Make(412).Apply(RestFailureFixture.Upsert(true));
     assert.equal(result.Applied, 0);
-    assert.equal(result.Conflicts.length, 1);
+    assert.equal(result.Failures.length, 1);
 });
 
 test("a 404 on delete is tolerated as already absent", async () =>
 {
     const result = await RestFailureFixture.Make(404).Apply(RestFailureFixture.Delete());
     assert.equal(result.Applied, 1);
-    assert.equal(result.Conflicts.length, 0);
+    assert.equal(result.Failures.length, 0);
 });
 
 test("a 500 on delete throws", async () =>

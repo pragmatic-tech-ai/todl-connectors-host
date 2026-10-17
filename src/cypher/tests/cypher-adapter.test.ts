@@ -43,8 +43,8 @@ test("an optimistic version mismatch is a conflict, not applied, never thrown", 
         Operations: [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" }, Version: "stale" }],
     });
     assert.equal(result.Applied, 0);
-    assert.equal(result.Conflicts.length, 1);
-    assert.match(result.Conflicts[0]!.Reason, /version/);
+    assert.equal(result.Failures.length, 1);
+    assert.match(result.Failures[0]!.Reason, /version/);
 });
 
 test("a hostile Source containing a backtick is emitted backtick-escaped (no injection)", async () =>
@@ -64,5 +64,5 @@ test("a version-guarded upsert of a new key proceeds", async () =>
         Operations: [{ Kind: WriteOperationKind.Upsert, Key: "c9", Fields: { label: "New" }, Version: "v1" }],
     });
     assert.equal(result.Applied, 1);
-    assert.equal(result.Conflicts.length, 0);
+    assert.equal(result.Failures.length, 0);
 });

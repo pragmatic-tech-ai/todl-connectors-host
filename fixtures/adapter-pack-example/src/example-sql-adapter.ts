@@ -74,7 +74,7 @@ export class ExampleSqlAdapter implements IDataSourceAdapter
 
     public async Apply(batch: WriteBatch): Promise<WriteResult>
     {
-        return { Applied: batch.Operations.length, Conflicts: [] };
+        return { Applied: batch.Operations.length, Failures: [] };
     }
 
     public async Dispose(): Promise<void>

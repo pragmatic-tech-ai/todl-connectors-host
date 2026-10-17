@@ -1,5 +1,5 @@
-import { WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalRecord, IDataSourceAdapter, QueryRequest, WriteBatch, WriteConflict, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import { WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import type { ExternalRecord, IDataSourceAdapter, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { CypherIdentifier } from "./cypher-identifier.js";
 import type { ICypherSession } from "./cypher-session.js";
@@ -49,7 +49,7 @@ export class CypherAdapter implements IDataSourceAdapter
     public async Apply(batch: WriteBatch): Promise<WriteResult>
     {
         let applied = 0;
-        const conflicts: WriteConflict[] = [];
+        const conflicts: WriteFailure[] = [];
         for (const op of batch.Operations)
         {
             if (op.Kind === WriteOperationKind.Delete)
@@ -63,10 +63,10 @@ export class CypherAdapter implements IDataSourceAdapter
             }
             else
             {
-                conflicts.push({ Key: op.Key, Reason: CypherAdapter.VersionConflictReason });
+                conflicts.push({ Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: CypherAdapter.VersionConflictReason });
             }
         }
-        return { Applied: applied, Conflicts: conflicts };
+        return { Applied: applied, Failures: conflicts };
     }
 
     public async Dispose(): Promise<void>

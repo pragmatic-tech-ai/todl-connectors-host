@@ -53,8 +53,8 @@ test("writes with no configured mutation become conflicts, never throw", async (
     const result = await adapter.Apply({ Source: Customer, IdKey: "id",
         Operations: [{ Kind: WriteOperationKind.Upsert, Key: "c9", Fields: { label: "z" } }] });
     assert.equal(result.Applied, 0);
-    assert.equal(result.Conflicts.length, 1);
-    assert.match(result.Conflicts[0]!.Reason, /not configured/);
+    assert.equal(result.Failures.length, 1);
+    assert.match(result.Failures[0]!.Reason, /not configured/);
 });
 
 test("a configured upsert whose response has errors throws a secret-free error", async () =>

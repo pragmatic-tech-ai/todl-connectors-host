@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { newDb } from "pg-mem";
 import type { Pool } from "pg";
 import { ServiceProvider } from "@pragmatic-tech-ai/todl-runtime";
-import { FederatedModelDataConnector, check, toJSON, DataSourceKind } from "@pragmatic-tech-ai/todl";
+import { FederatedModelDataConnector, check, toJSON, DataSourceKind, WriteAtomicity, WriteConcurrency } from "@pragmatic-tech-ai/todl";
 import type { ModelConnectorPlan } from "@pragmatic-tech-ai/todl";
 import { ConnectorsHost } from "../connectors-host.js";
 import { RecordingResolutionAuditSink } from "../resolution-audit/recording-resolution-audit-sink.js";
@@ -43,8 +43,8 @@ class ResolutionAuditE2e
             Model: "shop", Version: "1",
             Connectors: [{ Name: "opsdb", Kind: DataSourceKind.Sql, Config: { database: "app" } }],
             Bindings: [
-                { Concept: "shop.Customer", Connector: "opsdb", Source: "contacts", IdKey: "customer_id", FieldMap: fieldMap, Writable: true },
-                { Concept: "shop.Customer", Connector: "opsdb", Source: "crm_accounts", IdKey: "customer_id", FieldMap: fieldMap, Writable: true },
+                { Concept: "shop.Customer", Connector: "opsdb", Source: "contacts", IdKey: "customer_id", FieldMap: fieldMap, Writable: true, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential },
+                { Concept: "shop.Customer", Connector: "opsdb", Source: "crm_accounts", IdKey: "customer_id", FieldMap: fieldMap, Writable: true, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential },
             ],
         };
     }

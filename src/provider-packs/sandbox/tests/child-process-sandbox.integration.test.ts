@@ -185,7 +185,7 @@ test("child: Open + Query returns the seeded records and Apply round-trips its W
             IdKey: ChildSandboxFixture.IdField,
             Operations: [{ Kind: WriteOperationKind.Upsert, Key: 1, Fields: { [ChildSandboxFixture.NameField]: ChildSandboxFixture.GammaName } }]
         });
-        assert.deepEqual(result, { Applied: 1, Conflicts: [] });
+        assert.deepEqual(result, { Applied: 1, Failures: [] });
 
         await adapter.Dispose();
     }

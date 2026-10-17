@@ -1,5 +1,5 @@
-import { WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalRecord, QueryRequest, WriteBatch, WriteConflict, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import { WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import type { ExternalRecord, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { RestHttpMethod } from "./rest-http-client.js";
@@ -110,13 +110,13 @@ export class GraphQlAdapter implements IDataSourceAdapter
     public async Apply(batch: WriteBatch): Promise<WriteResult>
     {
         let applied = 0;
-        const conflicts: WriteConflict[] = [];
+        const conflicts: WriteFailure[] = [];
         for (const op of batch.Operations)
         {
             if (await this.ApplyOne(batch, op)) applied++;
-            else conflicts.push({ Key: op.Key, Reason: GraphQlAdapter.WriteNotConfiguredReason });
+            else conflicts.push({ Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: GraphQlAdapter.WriteNotConfiguredReason });
         }
-        return { Applied: applied, Conflicts: conflicts };
+        return { Applied: applied, Failures: conflicts };
     }
 
     public async Dispose(): Promise<void>

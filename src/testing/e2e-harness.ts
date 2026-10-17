@@ -1,6 +1,6 @@
 import { newDb } from "pg-mem";
 import type { Pool } from "pg";
-import { DataSourceKind } from "@pragmatic-tech-ai/todl";
+import { DataSourceKind, WriteAtomicity, WriteConcurrency } from "@pragmatic-tech-ai/todl";
 import type { ModelConnectorPlan } from "@pragmatic-tech-ai/todl";
 import { ConnectorsHost } from "../connectors-host.js";
 import { FakeRestHttpClient } from "./fake-rest-http-client.js";
@@ -53,9 +53,9 @@ export class E2eHarness
             ],
             Bindings: [
                 { Concept: E2eHarness.CustomerConcept, Connector: E2eHarness.SqlConnector, Source: E2eHarness.CustomerSource,
-                    IdKey: E2eHarness.IdKey, FieldMap: fieldMap, Writable: true },
+                    IdKey: E2eHarness.IdKey, FieldMap: fieldMap, Writable: true, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential },
                 { Concept: E2eHarness.OrderConcept, Connector: E2eHarness.RestConnector, Source: E2eHarness.OrderSource,
-                    IdKey: E2eHarness.IdKey, FieldMap: fieldMap, Writable: true },
+                    IdKey: E2eHarness.IdKey, FieldMap: fieldMap, Writable: true, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential },
             ],
         };
     }

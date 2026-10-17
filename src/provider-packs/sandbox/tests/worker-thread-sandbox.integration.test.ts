@@ -120,7 +120,7 @@ test("Open + Query returns the pack's seeded records and Apply round-trips its W
             IdKey: SandboxFixture.IdField,
             Operations: [{ Kind: WriteOperationKind.Upsert, Key: 1, Fields: { [SandboxFixture.NameField]: "gamma" } }]
         });
-        assert.deepEqual(result, { Applied: 1, Conflicts: [] });
+        assert.deepEqual(result, { Applied: 1, Failures: [] });
 
         await adapter.Dispose();
     }

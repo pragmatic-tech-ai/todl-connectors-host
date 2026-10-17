@@ -50,7 +50,7 @@ export function describeDataSourceAdapter(name: string, make: () => IDataSourceA
             Operations: [{ Kind: WriteOperationKind.Upsert, Key: NewId, Fields: { [Label]: NewLabel } }],
         });
         assert.equal(result.Applied, 1);
-        assert.equal(result.Conflicts.length, 0);
+        assert.equal(result.Failures.length, 0);
         const rows = await adapter.Query({ Source: Customer, Fields: [IdKey, Label] });
         assert.equal(rows.length, 2);
         assert.deepEqual(rows.find(r => r[IdKey] === NewId), { [IdKey]: NewId, [Label]: NewLabel });
