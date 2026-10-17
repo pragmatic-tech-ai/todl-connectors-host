@@ -20,7 +20,7 @@ interface AllowlistFile
 export class ScriptAllowlist
 {
     private static readonly Utf8 = "utf8";
-    private static readonly TempPrefix = ".tmp";
+    private static readonly TempPrefix = ".allowlist-tmp";
     private static readonly MissingFileCode = "ENOENT";
     private static readonly Locks = new Map<string, Promise<void>>();
     private static readonly NamesKey = "names";

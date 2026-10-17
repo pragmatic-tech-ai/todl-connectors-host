@@ -509,3 +509,62 @@ test("a swallowed GC failure does not swallow a real launch error", async () =>
         await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" }), AdapterPackErrorKind.SandboxLaunchFailed);
     }, { eviction: throwing });
 });
+
+test("the script allowlist is seeded, and Allow/Deny mutate it", async () =>
+{
+    await Env.With(async provider =>
+    {
+        assert.ok((await provider.ListScriptAllowlist()).includes("seed-pack"));
+        await provider.AllowScripts("x");
+        assert.ok((await provider.ListScriptAllowlist()).includes("x"));
+        await provider.DenyScripts("seed-pack");
+        assert.ok(!(await provider.ListScriptAllowlist()).includes("seed-pack"));
+    }, { scriptAllowlist: ["seed-pack"] });
+});
+
+test("after Dispose the script-allowlist operations reject ProviderDisposed", async () =>
+{
+    await Env.With(async provider =>
+    {
+        await provider.Dispose();
+        await Env.Rejects(provider.AllowScripts("x"), AdapterPackErrorKind.ProviderDisposed);
+        await Env.Rejects(provider.DenyScripts("x"), AdapterPackErrorKind.ProviderDisposed);
+        await Env.Rejects(provider.ListScriptAllowlist(), AdapterPackErrorKind.ProviderDisposed);
+    });
+});
+
+test("AllowScripts invalidates the pack: sandbox disposed and next resolve re-installs and re-launches", async () =>
+{
+    await Env.With(async (provider, npm, sandboxes) =>
+    {
+        const spec = "acme-pack@^1";
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+        await provider.AllowScripts("acme-pack");
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+        assert.equal(npm.Installs, 2);
+        assert.equal(sandboxes.Launches, 2);
+    });
+});
+
+test("DenyScripts invalidates the pack and leaves other packs alone", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "other-pack@^1" });
+        await provider.DenyScripts("acme-pack");
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
+        assert.ok(!sandboxes.Sandboxes[1].Disposed);
+    });
+});
+
+test("AllowScripts with an invalid name rejects and does not invalidate the pack", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        await assert.rejects(provider.AllowScripts("../evil"));
+        assert.ok(!sandboxes.Sandboxes[0].Disposed);
+    });
+});

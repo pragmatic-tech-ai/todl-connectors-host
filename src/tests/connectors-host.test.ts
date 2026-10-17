@@ -191,3 +191,27 @@ test("InvalidateProvider tolerates a host with no provider", async () =>
 {
     await new ConnectorsHost().InvalidateProvider("acme@^1");
 });
+
+test("script-allowlist passthroughs on a host with no provider are no-ops and list is empty", async () =>
+{
+    const host = new ConnectorsHost();
+    assert.deepEqual(await host.ListPackScriptAllowlist(), []);
+    await host.AllowPackScripts("acme");
+    await host.DenyPackScripts("acme");
+});
+
+test("script-allowlist passthroughs forward to the provider", async () =>
+{
+    const seen: string[] = [];
+    const provider = {
+        Resolve: async () => { throw new Error("unused"); },
+        AllowScripts: async (n: string) => { seen.push(`allow:${n}`); },
+        DenyScripts: async (n: string) => { seen.push(`deny:${n}`); },
+        ListScriptAllowlist: async () => ["a"],
+    };
+    const host = new ConnectorsHost({ provider: provider as IDataSourceAdapterProvider });
+    await host.AllowPackScripts("p");
+    await host.DenyPackScripts("q");
+    assert.deepEqual(seen, ["allow:p", "deny:q"]);
+    assert.deepEqual(await host.ListPackScriptAllowlist(), ["a"]);
+});

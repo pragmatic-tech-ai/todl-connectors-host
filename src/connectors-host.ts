@@ -64,6 +64,25 @@ export class ConnectorsHost
         await target?.Invalidate?.(name);
     }
 
+    /** Allows install scripts for a pack. No-op when there is no provider or it lacks AllowScripts. */
+    public async AllowPackScripts(name: string): Promise<void>
+    {
+        const target = this.provider as { AllowScripts?: (n: string) => Promise<void> } | undefined;
+        await target?.AllowScripts?.(name);
+    }
+
+    public async DenyPackScripts(name: string): Promise<void>
+    {
+        const target = this.provider as { DenyScripts?: (n: string) => Promise<void> } | undefined;
+        await target?.DenyScripts?.(name);
+    }
+
+    public async ListPackScriptAllowlist(): Promise<readonly string[]>
+    {
+        const target = this.provider as { ListScriptAllowlist?: () => Promise<readonly string[]> } | undefined;
+        return (await target?.ListScriptAllowlist?.()) ?? [];
+    }
+
     public async Dispose(): Promise<void>
     {
         // Both teardowns always run: a catalog failure must not skip the provider (sandbox/child leak).

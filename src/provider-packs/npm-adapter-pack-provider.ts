@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { AdapterResolutionRequest, IDataSourceAdapterFactory, IDataSourceAdapterProvider } from "@pragmatic-tech-ai/todl";
 import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js";
 import { AdapterPackInstaller } from "./adapter-pack-installer.js";
@@ -6,6 +7,7 @@ import { NpmCli } from "./npm-cli.js";
 import type { INpmCli } from "./npm-cli.js";
 import { PackCache } from "./pack-cache.js";
 import type { CacheEvictionPolicy } from "./pack-cache.js";
+import { ScriptAllowlist } from "./script-allowlist.js";
 import type { IPackSandbox, IPackSandboxFactory, PackSandboxOptions } from "./sandbox/pack-sandbox.js";
 
 export interface NpmAdapterPackProviderOptions
@@ -19,6 +21,8 @@ export interface NpmAdapterPackProviderOptions
     readonly requireSignatures?: boolean;
     readonly eviction?: CacheEvictionPolicy;
     readonly npm?: INpmCli;
+    /** Pack names seeded as script-allowed on first run; the persisted allowlist (one file in cacheDir) is authoritative thereafter. */
+    readonly scriptAllowlist?: readonly string[];
 }
 
 interface ProviderSpec
@@ -44,6 +48,7 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
     /** Registry semver version/range or dist-tag characters only: no ":" or "/" so no url/file/git/alias specifiers. */
     private static readonly RangePattern = /^[A-Za-z0-9*^~<>=][A-Za-z0-9.+^~<>=*| -]*$/;
     private static readonly ParentSegment = "..";
+    private static readonly ScriptAllowlistFileName = "script-allowlist.json";
 
     private readonly installer: AdapterPackInstaller;
     private readonly cache: PackCache;
@@ -54,7 +59,10 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
     public constructor(private readonly options: NpmAdapterPackProviderOptions)
     {
         const npm = options.npm ?? new NpmCli();
-        this.installer = new AdapterPackInstaller(options.cacheDir, npm, options.requireSignatures ?? false);
+        const scripts = new ScriptAllowlist(
+            join(options.cacheDir, NpmAdapterPackProvider.ScriptAllowlistFileName),
+            options.scriptAllowlist ?? []);
+        this.installer = new AdapterPackInstaller(options.cacheDir, npm, options.requireSignatures ?? false, scripts);
         this.cache = new PackCache(options.cacheDir);
     }
 
@@ -95,6 +103,28 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         await Promise.all(launches.map(l => l.then(s => s.Dispose(), () => undefined).catch(() => undefined)));
         this.installer.Invalidate(name);
         await this.Gc();
+    }
+
+    /** Allows install scripts for `name`; invalidates the pack because installs are memoized per resolved version. */
+    public async AllowScripts(name: string): Promise<void>
+    {
+        this.EnsureLive();
+        await this.installer.AllowScripts(name);
+        await this.Invalidate(name);
+    }
+
+    /** Revokes install scripts for `name`; invalidates the pack so the next Resolve re-installs without them. */
+    public async DenyScripts(name: string): Promise<void>
+    {
+        this.EnsureLive();
+        await this.installer.DenyScripts(name);
+        await this.Invalidate(name);
+    }
+
+    public async ListScriptAllowlist(): Promise<readonly string[]>
+    {
+        this.EnsureLive();
+        return this.installer.ListScriptAllowlist();
     }
 
     /** Best-effort cache reclaim that never evicts a root with a live sandbox; failures are swallowed. */
