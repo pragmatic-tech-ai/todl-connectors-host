@@ -86,3 +86,105 @@ test("Touch on a missing root does not throw", async () =>
         await new PackCache(cacheDir).Touch(join(cacheDir, "gone", "1.0.0"));
     });
 });
+
+class EvictEnv
+{
+    public static readonly Day = 86400000;
+
+    public static Seed(cache: PackCache, name: string, version: string, ageMs: number | undefined): string
+    {
+        const root = cache.PathFor(name, version);
+        mkdirSync(root, { recursive: true });
+        if (ageMs !== undefined)
+        {
+            writeFileSync(join(root, ".todl-accessed"), String(Date.now() - ageMs));
+        }
+        return root;
+    }
+}
+
+test("Evict with MaxVersionsPerPack keeps only the most recently touched versions", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const a1 = EvictEnv.Seed(cache, "a", "1.0.0", 3 * EvictEnv.Day);
+        const a2 = EvictEnv.Seed(cache, "a", "2.0.0", 2 * EvictEnv.Day);
+        const a3 = EvictEnv.Seed(cache, "a", "3.0.0", 1 * EvictEnv.Day);
+        const b1 = EvictEnv.Seed(cache, "b", "1.0.0", 5 * EvictEnv.Day);
+        const removed = await cache.Evict({ MaxVersionsPerPack: 1 }, new Set<string>());
+        assert.deepEqual([...removed].sort(), [a1, a2].sort());
+        assert.equal(existsSync(a3), true);
+        assert.equal(existsSync(b1), true);
+    });
+});
+
+test("Evict never removes an in-use root even when it is the oldest", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const old = EvictEnv.Seed(cache, "a", "1.0.0", 9 * EvictEnv.Day);
+        const mid = EvictEnv.Seed(cache, "a", "2.0.0", 2 * EvictEnv.Day);
+        const fresh = EvictEnv.Seed(cache, "a", "3.0.0", 1000);
+        const removed = await cache.Evict({ MaxVersionsPerPack: 1, MaxAgeMs: EvictEnv.Day }, new Set<string>([old]));
+        assert.equal(existsSync(old), true);
+        assert.equal(removed.includes(old), false);
+        assert.equal(existsSync(mid), false);
+        assert.equal(existsSync(fresh), true);
+    });
+});
+
+test("Evict with MaxAgeMs removes roots older than the bound unless in use", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const stale = EvictEnv.Seed(cache, "a", "1.0.0", 10 * EvictEnv.Day);
+        const pinned = EvictEnv.Seed(cache, "b", "1.0.0", 10 * EvictEnv.Day);
+        const fresh = EvictEnv.Seed(cache, "c", "1.0.0", 1000);
+        const removed = await cache.Evict({ MaxAgeMs: 5 * EvictEnv.Day }, new Set<string>([pinned]));
+        assert.deepEqual([...removed], [stale]);
+        assert.equal(existsSync(pinned), true);
+        assert.equal(existsSync(fresh), true);
+    });
+});
+
+test("Evict treats a missing marker as oldest and leaves a pack within limits untouched", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const unmarked = EvictEnv.Seed(cache, "a", "1.0.0", undefined);
+        const marked = EvictEnv.Seed(cache, "a", "2.0.0", 1000);
+        const lone = EvictEnv.Seed(cache, "b", "1.0.0", undefined);
+        const removed = await cache.Evict({ MaxVersionsPerPack: 1 }, new Set<string>());
+        assert.deepEqual([...removed], [unmarked]);
+        assert.equal(existsSync(marked), true);
+        assert.equal(existsSync(lone), true);
+    });
+});
+
+test("Evict handles scoped pack names and ignores temp dirs", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const s1 = EvictEnv.Seed(cache, "@scope/p", "1.0.0", 2 * EvictEnv.Day);
+        const s2 = EvictEnv.Seed(cache, "@scope/p", "2.0.0", 1000);
+        mkdirSync(join(cacheDir, ".tmp-xyz"));
+        const removed = await cache.Evict({ MaxVersionsPerPack: 1 }, new Set<string>());
+        assert.deepEqual([...removed], [s1]);
+        assert.equal(existsSync(s2), true);
+        assert.equal(existsSync(join(cacheDir, ".tmp-xyz")), true);
+    });
+});
+
+test("Evict on a missing cache dir removes nothing", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const removed = await new PackCache(join(cacheDir, "nope")).Evict({ MaxVersionsPerPack: 1 }, new Set<string>());
+        assert.deepEqual([...removed], []);
+    });
+});
