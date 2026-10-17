@@ -7,6 +7,9 @@ export class ExampleSqlAdapter {
     static CrashSource = "__crash__";
     static HangSource = "__hang__";
     static Exit0Source = "__exit0__";
+    static EchoSource = "__echo__";
+    static WedgeSource = "__wedge__";
+    static SigTerm = "SIGTERM";
     static Seed = {
         [ExampleSqlAdapter.WidgetsSource]: [
             { id: 1, name: "alpha" },
@@ -29,6 +32,16 @@ export class ExampleSqlAdapter {
             // Respond normally, then let the worker self-exit cleanly on the next tick so the host
             // observes a code-0 exit while idle.
             setTimeout(() => process.exit(0), 0);
+            return [];
+        }
+        if (request.Source === ExampleSqlAdapter.EchoSource) {
+            // Returns the received request embedded in a record: lets a host prove how values cross the wire.
+            return [{ echoed: request }];
+        }
+        if (request.Source === ExampleSqlAdapter.WedgeSource) {
+            // Ignores graceful termination so a host's forced-kill fallback is exercised (POSIX).
+            process.on(ExampleSqlAdapter.SigTerm, () => {
+            });
             return [];
         }
         return ExampleSqlAdapter.Seed[request.Source] ?? [];

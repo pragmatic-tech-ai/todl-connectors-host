@@ -8,6 +8,9 @@ export declare class ExampleSqlAdapter implements IDataSourceAdapter {
     private static readonly CrashSource;
     private static readonly HangSource;
     private static readonly Exit0Source;
+    private static readonly EchoSource;
+    private static readonly WedgeSource;
+    private static readonly SigTerm;
     private static readonly Seed;
     static get Kind(): DataSourceKind;
     Query(request: QueryRequest): Promise<readonly ExternalRecord[]>;

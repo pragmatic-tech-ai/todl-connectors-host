@@ -19,6 +19,9 @@ export class ExampleSqlAdapter implements IDataSourceAdapter
     private static readonly CrashSource = "__crash__";
     private static readonly HangSource = "__hang__";
     private static readonly Exit0Source = "__exit0__";
+    private static readonly EchoSource = "__echo__";
+    private static readonly WedgeSource = "__wedge__";
+    private static readonly SigTerm = "SIGTERM";
     private static readonly Seed: Record<string, readonly ExternalRecord[]> =
     {
         [ExampleSqlAdapter.WidgetsSource]:
@@ -51,6 +54,19 @@ export class ExampleSqlAdapter implements IDataSourceAdapter
             // Respond normally, then let the worker self-exit cleanly on the next tick so the host
             // observes a code-0 exit while idle.
             setTimeout(() => process.exit(0), 0);
+            return [];
+        }
+        if (request.Source === ExampleSqlAdapter.EchoSource)
+        {
+            // Returns the received request embedded in a record: lets a host prove how values cross the wire.
+            return [{ echoed: request } as unknown as ExternalRecord];
+        }
+        if (request.Source === ExampleSqlAdapter.WedgeSource)
+        {
+            // Ignores graceful termination so a host's forced-kill fallback is exercised (POSIX).
+            process.on(ExampleSqlAdapter.SigTerm, () =>
+            {
+            });
             return [];
         }
         return ExampleSqlAdapter.Seed[request.Source] ?? [];
