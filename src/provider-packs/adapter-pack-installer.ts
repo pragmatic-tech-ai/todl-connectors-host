@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js";
 import { AdapterPackManifestReader } from "./adapter-pack-manifest-reader.js";
 import type { INpmCli } from "./npm-cli.js";
@@ -24,6 +24,9 @@ export class AdapterPackInstaller
     private static readonly InstallPackageName = "adapter-pack-install";
     private static readonly LockPackagesPrefix = "node_modules/";
     private static readonly Utf8 = "utf8";
+    private static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+    private static readonly MaxNameLength = 214;
+    private static readonly ParentSegment = "..";
     private static readonly RaceCodes: readonly string[] = ["EEXIST", "ENOTEMPTY", "EPERM"];
 
     private readonly inFlight = new Map<string, Promise<InstalledPack>>();
@@ -60,6 +63,7 @@ export class AdapterPackInstaller
 
     private async Resolve(name: string, range: string): Promise<InstalledPack>
     {
+        AdapterPackInstaller.ValidateName(name);
         await mkdir(this.cacheDir, { recursive: true });
         const tmp = await mkdtemp(join(this.cacheDir, AdapterPackInstaller.TempPrefix));
         let promoted = false;
@@ -69,7 +73,9 @@ export class AdapterPackInstaller
             await writeFile(join(tmp, AdapterPackInstaller.PackageJsonName), JSON.stringify(installJson, null, 2));
             await this.npm.Install(tmp);
             const version = await this.ReadLockedVersion(tmp, name);
-            await AdapterPackManifestReader.Read(join(tmp, AdapterPackInstaller.NodeModules, name));
+            const tmpPackDir = join(tmp, AdapterPackInstaller.NodeModules, name);
+            const tmpRead = await AdapterPackManifestReader.Read(tmpPackDir);
+            AdapterPackInstaller.EnsureEntryInside(tmpPackDir, tmpRead.manifest.entry, name);
 
             const root = join(this.cacheDir, name, version);
             if (!(await this.Exists(root)))
@@ -89,12 +95,14 @@ export class AdapterPackInstaller
                     }
                 }
             }
-            const { manifest } = await AdapterPackManifestReader.Read(join(root, AdapterPackInstaller.NodeModules, name));
+            const packDir = join(root, AdapterPackInstaller.NodeModules, name);
+            const { manifest } = await AdapterPackManifestReader.Read(packDir);
+            AdapterPackInstaller.EnsureEntryInside(packDir, manifest.entry, name);
             return {
                 Name: name,
                 Version: version,
                 Root: root,
-                Entry: join(root, AdapterPackInstaller.NodeModules, name, manifest.entry),
+                Entry: join(packDir, manifest.entry),
                 Kinds: manifest.kinds
             };
         }
@@ -104,6 +112,23 @@ export class AdapterPackInstaller
             {
                 await rm(tmp, { recursive: true, force: true });
             }
+        }
+    }
+
+    private static ValidateName(name: string): void
+    {
+        if (typeof name !== "string" || name.length > AdapterPackInstaller.MaxNameLength || !AdapterPackInstaller.NamePattern.test(name))
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.InvalidName, `Invalid adapter pack name: ${JSON.stringify(name)}`);
+        }
+    }
+
+    private static EnsureEntryInside(packDir: string, entry: string, name: string): void
+    {
+        const rel = relative(packDir, resolve(packDir, entry));
+        if (rel === "" || isAbsolute(rel) || rel === AdapterPackInstaller.ParentSegment || rel.startsWith(AdapterPackInstaller.ParentSegment + sep))
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.ManifestInvalid, `${name} manifest entry "${entry}" escapes the pack directory`);
         }
     }
 

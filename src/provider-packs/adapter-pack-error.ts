@@ -5,7 +5,8 @@ export enum AdapterPackErrorKind
     LockfileUnreadable = "lockfile-unreadable",
     ManifestMissing = "manifest-missing",
     ManifestInvalid = "manifest-invalid",
-    AbiMismatch = "abi-mismatch"
+    AbiMismatch = "abi-mismatch",
+    InvalidName = "invalid-name"
 }
 
 /** A typed failure raised while installing or reading an adapter pack. */
