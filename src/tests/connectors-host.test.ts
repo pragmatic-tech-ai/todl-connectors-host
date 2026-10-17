@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ServiceProvider } from "@pragmatic-tech-ai/todl-runtime";
 import { DataSourceAdapterCatalog, DataSourceKind, ConnectionResolverKey, ResolutionAuditSinkKey } from "@pragmatic-tech-ai/todl";
-import type { IConnectionResolver, ResolvedConnection, ConnectorSpec } from "@pragmatic-tech-ai/todl";
+import type { IConnectionResolver, ResolvedConnection, ConnectorSpec, IDataSourceAdapter, IDataSourceAdapterFactory, IDataSourceAdapterProvider } from "@pragmatic-tech-ai/todl";
 import { ConnectorsHost } from "../connectors-host.js";
 import { RecordingResolutionAuditSink } from "../resolution-audit/recording-resolution-audit-sink.js";
 import { FakeRestHttpClient } from "../testing/fake-rest-http-client.js";
@@ -80,4 +80,57 @@ test("without an audit sink the key is absent", () =>
     const services = new ServiceProvider();
     new ConnectorsHost().Register(services);
     assert.equal(services.has(ResolutionAuditSinkKey), false);
+});
+
+class FakeProvider implements IDataSourceAdapterProvider
+{
+    public Disposed = 0;
+    public readonly Requests: { Kind: DataSourceKind; Provider?: string }[] = [];
+
+    public constructor(private readonly adapter: IDataSourceAdapter)
+    {
+    }
+
+    public async Resolve(request: { Kind: DataSourceKind; Provider?: string }): Promise<IDataSourceAdapterFactory>
+    {
+        this.Requests.push(request);
+        const adapter = this.adapter;
+        return { Kind: request.Kind, Open: async () => adapter };
+    }
+
+    public async Dispose(): Promise<void>
+    {
+        this.Disposed++;
+    }
+}
+
+test("a connector naming a provider resolves through the host's provider", async () =>
+{
+    const adapter = { Dispose: async () => { } } as unknown as IDataSourceAdapter;
+    const provider = new FakeProvider(adapter);
+    const host = new ConnectorsHost({ provider });
+    const spec: ConnectorSpec = { Name: "p", Kind: DataSourceKind.Rest, Config: {}, Provider: "pack@1" };
+    const opened = await host.Catalog.Open(spec, new ServiceProvider());
+    assert.equal(opened, adapter);
+    assert.deepEqual(provider.Requests, [{ Kind: DataSourceKind.Rest, Provider: "pack@1" }]);
+});
+
+test("host Dispose disposes the provider", async () =>
+{
+    const provider = new FakeProvider({} as unknown as IDataSourceAdapter);
+    const host = new ConnectorsHost({ provider });
+    await host.Dispose();
+    assert.equal(provider.Disposed, 1);
+});
+
+test("host Dispose tolerates a provider without Dispose", async () =>
+{
+    const plain: IDataSourceAdapterProvider = { Resolve: async () => { throw new Error("unused"); } };
+    await new ConnectorsHost({ provider: plain }).Dispose();
+});
+
+test("host Dispose swallows a provider Dispose rejection", async () =>
+{
+    const failing = { Resolve: async () => { throw new Error("unused"); }, Dispose: async () => { throw new Error("boom"); } };
+    await new ConnectorsHost({ provider: failing as IDataSourceAdapterProvider }).Dispose();
 });
