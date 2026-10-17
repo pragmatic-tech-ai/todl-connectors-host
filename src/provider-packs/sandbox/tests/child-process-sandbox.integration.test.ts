@@ -41,7 +41,7 @@ class ChildSandboxFixture
     public static readonly EchoSource = "__echo__";
     public static readonly WedgeSource = "__wedge__";
     public static readonly SigKill: NodeJS.Signals = "SIGKILL";
-    public static readonly GammaName = ChildSandboxFixture.GammaName;
+    public static readonly GammaName = "gamma";
     public static readonly OldSpaceFlag = "--max-old-space-size=64";
     public static readonly StackFlag = "--stack-size=1024";
     public static readonly OldSpaceMb = 64;
