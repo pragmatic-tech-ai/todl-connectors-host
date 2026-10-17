@@ -1,7 +1,7 @@
-import { parentPort, workerData, type MessagePort } from "node:worker_threads";
+import { parentPort, workerData } from "node:worker_threads";
 import { pathToFileURL } from "node:url";
 import { PackWorkerOp } from "./pack-worker-protocol.js";
-import type { PackWorkerFailed, PackWorkerReady, PackWorkerRequest, PackWorkerResponse } from "./pack-worker-protocol.js";
+import type { IPackHostPort, PackWorkerFailed, PackWorkerReady, PackWorkerRequest, PackWorkerResponse } from "./pack-worker-protocol.js";
 import type { IAdapterPack } from "@pragmatic-tech-ai/todl/adapter-pack";
 import type { IDataSourceAdapter, IDataSourceAdapterFactory } from "@pragmatic-tech-ai/todl";
 
@@ -28,7 +28,7 @@ export class AdapterPackHost
     private readonly byKind = new Map<string, IDataSourceAdapterFactory>();
     private nextHandle = 1;
 
-    private constructor(private readonly port: MessagePort, factories: readonly IDataSourceAdapterFactory[])
+    private constructor(private readonly port: IPackHostPort, factories: readonly IDataSourceAdapterFactory[])
     {
         for (const factory of factories)
         {
@@ -38,7 +38,7 @@ export class AdapterPackHost
 
     /** Imports and validates the pack; on success wires request handling and posts `{ready:true}`,
      *  otherwise posts `{ready:false,error}` and returns without handling requests. */
-    public static async Boot(port: MessagePort | null, data: PackHostData): Promise<void>
+    public static async Boot(port: IPackHostPort | null, data: PackHostData): Promise<void>
     {
         if (port === null)
         {

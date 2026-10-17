@@ -48,3 +48,15 @@ export interface PackWorkerFailed
     readonly ready: false;
     readonly error: string;
 }
+
+/** Name of the environment variable that carries the absolute pack entry path to a forked child
+ *  (a child process has no `workerData`). Single home shared by the launcher and the child entry. */
+export const PackEntryEnvVar = "TODL_PACK_ENTRY";
+
+/** The subset of `MessagePort` / `process` IPC the pack host entry uses; `parentPort` and the
+ *  child-process shim both satisfy it. */
+export interface IPackHostPort
+{
+    postMessage(message: unknown): void;
+    on(event: string, handler: (message: any) => void): void;
+}

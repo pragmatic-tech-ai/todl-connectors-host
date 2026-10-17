@@ -12,6 +12,8 @@ export interface PackSandboxOptions
     };
     readonly startupTimeoutMs?: number;
     readonly callTimeoutMs?: number;
+    /** POSIX-only privilege drop for the child-process strategy; ignored by the worker strategy and on Windows. */
+    readonly privilege?: { readonly uid?: number; readonly gid?: number };
 }
 
 /** A launched pack running in isolation. `Factory` hands back a proxy for a kind; whether the pack
