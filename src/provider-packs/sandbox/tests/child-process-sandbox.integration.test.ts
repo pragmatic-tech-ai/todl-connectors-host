@@ -41,6 +41,23 @@ class ChildSandboxFixture
     public static readonly EchoSource = "__echo__";
     public static readonly WedgeSource = "__wedge__";
     public static readonly SigKill: NodeJS.Signals = "SIGKILL";
+    public static readonly GammaName = ChildSandboxFixture.GammaName;
+    public static readonly OldSpaceFlag = "--max-old-space-size=64";
+    public static readonly StackFlag = "--stack-size=1024";
+    public static readonly OldSpaceMb = 64;
+    public static readonly StackMb = 1;
+    public static readonly Uid = 1234;
+    public static readonly Gid = 5678;
+    public static readonly SmallCallTimeoutMs = 200;
+    public static readonly SmallStartupTimeoutMs = 200;
+    public static readonly IdleCallTimeoutMs = 5000;
+    public static readonly BoundMs = 5000;
+    public static readonly ImmediateMs = 1000;
+    public static readonly ExitWaitMs = 5000;
+    public static readonly PollMs = 10;
+    /** Mirrors ChildProcessSandbox's private graceful-termination window before the SIGKILL fallback. */
+    public static readonly ForceKillMs = 2000;
+    public static readonly StartupTimeoutText = "did not report ready within the startup timeout";
     public static readonly Advanced = "advanced";
     public static readonly Win32 = "win32";
     public static readonly ExpectedWidgets: readonly ExternalRecord[] =
@@ -118,7 +135,7 @@ class ChildSandboxFixture
         const deadline = Date.now() + maxMs;
         while (!sandbox.HasExited && Date.now() < deadline)
         {
-            await new Promise<void>(settle => setTimeout(settle, 10));
+            await new Promise<void>(settle => setTimeout(settle, ChildSandboxFixture.PollMs));
         }
     }
 
@@ -145,7 +162,7 @@ test("child: Open + Query returns the seeded records and Apply round-trips its W
         {
             Source: ChildSandboxFixture.WidgetsSource,
             IdKey: ChildSandboxFixture.IdField,
-            Operations: [{ Kind: WriteOperationKind.Upsert, Key: 1, Fields: { [ChildSandboxFixture.NameField]: "gamma" } }]
+            Operations: [{ Kind: WriteOperationKind.Upsert, Key: 1, Fields: { [ChildSandboxFixture.NameField]: ChildSandboxFixture.GammaName } }]
         });
         assert.deepEqual(result, { Applied: 1, Conflicts: [] });
 
@@ -227,11 +244,15 @@ test("child: Launch rejects SandboxLaunchFailed when the pack entry has no defau
 test("child: Launch rejects SandboxLaunchFailed when the child never reports ready within startupTimeoutMs", { timeout: 60000 }, async () =>
 {
     const entry = ChildSandboxFixture.NeverReadyEntry();
+    const startedAt = Date.now();
     try
     {
         await assert.rejects(
-            new ChildProcessSandboxFactory().Launch(ChildSandboxFixture.Installed(entry), { startupTimeoutMs: 500 }),
-            ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxLaunchFailed));
+            new ChildProcessSandboxFactory().Launch(ChildSandboxFixture.Installed(entry), { startupTimeoutMs: ChildSandboxFixture.SmallStartupTimeoutMs }),
+            (err: unknown): boolean => ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxLaunchFailed)(err)
+                && (err as Error).message.includes(ChildSandboxFixture.StartupTimeoutText));
+        // An ignored option would wait the 30s default.
+        assert.ok(Date.now() - startedAt < ChildSandboxFixture.BoundMs, "the small startupTimeoutMs must be honored, not the 30s default");
     }
     finally
     {
@@ -256,13 +277,16 @@ test("child: Open on a data-source kind the pack does not provide rejects PackCa
 
 test("child: a never-responding call rejects SandboxTimeout once callTimeoutMs elapses", { timeout: 60000 }, async () =>
 {
-    const sandbox = await ChildSandboxFixture.Launch({ callTimeoutMs: 500 });
+    const sandbox = await ChildSandboxFixture.Launch({ callTimeoutMs: ChildSandboxFixture.SmallCallTimeoutMs });
     try
     {
         const adapter = await sandbox.Factory(DataSourceKind.Sql).Open({ Kind: DataSourceKind.Sql, Config: {} });
+        const startedAt = Date.now();
         await assert.rejects(
             adapter.Query({ Source: ChildSandboxFixture.HangSource, Fields: [] }),
             ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxTimeout));
+        // An ignored option would fall back to the 30s default and blow this bound.
+        assert.ok(Date.now() - startedAt < ChildSandboxFixture.BoundMs, "the small callTimeoutMs must be honored, not the 30s default");
     }
     finally
     {
@@ -285,7 +309,7 @@ test("child: crash by exit rejects the in-flight call and every later call Sandb
         await assert.rejects(
             adapter.Query({ Source: ChildSandboxFixture.WidgetsSource, Fields: [ChildSandboxFixture.IdField] }),
             ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxCrashed));
-        assert.ok(Date.now() - startedAt < 1000, "later call must reject immediately via the dead flag");
+        assert.ok(Date.now() - startedAt < ChildSandboxFixture.ImmediateMs, "later call must reject immediately via the dead flag");
     }
     finally
     {
@@ -301,6 +325,9 @@ test("child: crash by SIGKILL mid-flight rejects SandboxCrashed naming the signa
         const adapter = await sandbox.Factory(DataSourceKind.Sql).Open({ Kind: DataSourceKind.Sql, Config: {} });
 
         const inFlight = adapter.Query({ Source: ChildSandboxFixture.HangSource, Fields: [] });
+        // IPC is ordered and the pack never answers __hang__, so a completed round trip after it proves
+        // the hang request reached the child and is genuinely outstanding when the signal lands.
+        await adapter.Query({ Source: ChildSandboxFixture.WidgetsSource, Fields: [ChildSandboxFixture.IdField] });
         const outcome = assert.rejects(inFlight, (err: unknown): boolean =>
             ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxCrashed)(err) && (err as Error).message.includes(ChildSandboxFixture.SigKill));
         ChildSandboxFixture.KillChild(sandbox, ChildSandboxFixture.SigKill);
@@ -310,7 +337,7 @@ test("child: crash by SIGKILL mid-flight rejects SandboxCrashed naming the signa
         await assert.rejects(
             adapter.Query({ Source: ChildSandboxFixture.WidgetsSource, Fields: [ChildSandboxFixture.IdField] }),
             ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxCrashed));
-        assert.ok(Date.now() - startedAt < 1000, "later call must reject immediately via the dead flag");
+        assert.ok(Date.now() - startedAt < ChildSandboxFixture.ImmediateMs, "later call must reject immediately via the dead flag");
     }
     finally
     {
@@ -320,7 +347,7 @@ test("child: crash by SIGKILL mid-flight rejects SandboxCrashed naming the signa
 
 test("child: a clean exit while idle rejects later calls SandboxCrashed immediately, never SandboxTimeout", { timeout: 60000 }, async () =>
 {
-    const sandbox = await ChildSandboxFixture.Launch({ callTimeoutMs: 5000 });
+    const sandbox = await ChildSandboxFixture.Launch({ callTimeoutMs: ChildSandboxFixture.IdleCallTimeoutMs });
     try
     {
         const adapter = await sandbox.Factory(DataSourceKind.Sql).Open({ Kind: DataSourceKind.Sql, Config: {} });
@@ -328,14 +355,14 @@ test("child: a clean exit while idle rejects later calls SandboxCrashed immediat
         const records = await adapter.Query({ Source: ChildSandboxFixture.Exit0Source, Fields: [] });
         assert.deepEqual(records, []);
 
-        await ChildSandboxFixture.WaitUntilExited(sandbox, 5000);
+        await ChildSandboxFixture.WaitUntilExited(sandbox, ChildSandboxFixture.ExitWaitMs);
         assert.ok(sandbox.HasExited, "child should have exited cleanly");
 
         const startedAt = Date.now();
         await assert.rejects(
             adapter.Query({ Source: ChildSandboxFixture.WidgetsSource, Fields: [ChildSandboxFixture.IdField] }),
             ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxCrashed));
-        assert.ok(Date.now() - startedAt < 1000, "later call must reject via the dead flag, not fall through to the 5000ms callTimeoutMs");
+        assert.ok(Date.now() - startedAt < ChildSandboxFixture.ImmediateMs, "later call must reject via the dead flag, not fall through to the idle callTimeoutMs");
     }
     finally
     {
@@ -352,8 +379,13 @@ test("child: Dispose of a wedged child resolves with the child exited (forced-ki
     // the SIGKILL fallback can end it. (On Windows Node's kill() is always forceful; Dispose still must resolve.)
     await adapter.Query({ Source: ChildSandboxFixture.WedgeSource, Fields: [] });
 
+    const startedAt = Date.now();
     await sandbox.Dispose();
     assert.ok(sandbox.HasExited, "Dispose must not resolve until the child has actually exited");
+    if (process.platform !== ChildSandboxFixture.Win32)
+    {
+        assert.ok(Date.now() - startedAt >= ChildSandboxFixture.ForceKillMs - ChildSandboxFixture.PollMs, "an ignored SIGTERM must only end via the SIGKILL fallback after the graceful window");
+    }
 });
 
 test("child: Dispose is idempotent and later calls reject SandboxCrashed", { timeout: 60000 }, async () =>
@@ -375,14 +407,14 @@ test("child: BuildForkPlan composes advanced serialization, V8 limit flags, the 
     const installed = ChildSandboxFixture.Installed();
     const plan = ChildProcessSandboxFactory.BuildForkPlan(installed,
     {
-        resourceLimits: { maxOldGenerationSizeMb: 64, stackSizeMb: 1 },
-        privilege: { uid: 1234, gid: 5678 }
+        resourceLimits: { maxOldGenerationSizeMb: ChildSandboxFixture.OldSpaceMb, stackSizeMb: ChildSandboxFixture.StackMb },
+        privilege: { uid: ChildSandboxFixture.Uid, gid: ChildSandboxFixture.Gid }
     });
     const forkOptions = plan.forkOptions;
 
     assert.equal(forkOptions.serialization, ChildSandboxFixture.Advanced);
-    assert.ok(forkOptions.execArgv?.includes("--max-old-space-size=64"));
-    assert.ok(forkOptions.execArgv?.includes("--stack-size=1024"));
+    assert.ok(forkOptions.execArgv?.includes(ChildSandboxFixture.OldSpaceFlag));
+    assert.ok(forkOptions.execArgv?.includes(ChildSandboxFixture.StackFlag));
     assert.equal(forkOptions.env?.[PackEntryEnvVar], installed.Entry);
 
     if (process.platform === ChildSandboxFixture.Win32)
@@ -392,7 +424,7 @@ test("child: BuildForkPlan composes advanced serialization, V8 limit flags, the 
     }
     else
     {
-        assert.equal(forkOptions.uid, 1234);
-        assert.equal(forkOptions.gid, 5678);
+        assert.equal(forkOptions.uid, ChildSandboxFixture.Uid);
+        assert.equal(forkOptions.gid, ChildSandboxFixture.Gid);
     }
 });
