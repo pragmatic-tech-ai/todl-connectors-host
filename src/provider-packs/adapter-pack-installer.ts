@@ -28,6 +28,7 @@ export class AdapterPackInstaller
     private static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
     private static readonly MaxNameLength = 214;
     private static readonly ParentSegment = "..";
+    private static readonly SpecSeparator = "@";
 
     private readonly inFlight = new Map<string, Promise<InstalledPack>>();
     private readonly resolved = new Map<string, InstalledPack>();
@@ -57,16 +58,42 @@ export class AdapterPackInstaller
         {
             return existing;
         }
-        const promise = this.Resolve(name, range).then(pack =>
+        const promise: Promise<InstalledPack> = this.Resolve(name, range).then(pack =>
         {
-            this.resolved.set(key, pack);
+            if (this.inFlight.get(key) === promise)
+            {
+                this.resolved.set(key, pack);
+            }
             return pack;
         }).finally(() =>
         {
-            this.inFlight.delete(key);
+            if (this.inFlight.get(key) === promise)
+            {
+                this.inFlight.delete(key);
+            }
         });
         this.inFlight.set(key, promise);
         return promise;
+    }
+
+    /** Drops the memo (resolved and in-flight) for every range of `name`, so the next Install re-runs npm. The on-disk cache is untouched. */
+    public Invalidate(name: string): void
+    {
+        const prefix = `${name}${AdapterPackInstaller.SpecSeparator}`;
+        for (const key of [...this.resolved.keys()])
+        {
+            if (key === name || key.startsWith(prefix))
+            {
+                this.resolved.delete(key);
+            }
+        }
+        for (const key of [...this.inFlight.keys()])
+        {
+            if (key === name || key.startsWith(prefix))
+            {
+                this.inFlight.delete(key);
+            }
+        }
     }
 
     private async Resolve(name: string, range: string): Promise<InstalledPack>

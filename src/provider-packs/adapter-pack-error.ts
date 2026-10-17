@@ -11,7 +11,9 @@ export enum AdapterPackErrorKind
     SandboxLaunchFailed = "sandbox-launch-failed",
     SandboxCrashed = "sandbox-crashed",
     PackCallFailed = "pack-call-failed",
-    SandboxTimeout = "sandbox-timeout"
+    SandboxTimeout = "sandbox-timeout",
+    ProviderNotAllowed = "provider-not-allowed",
+    ProviderSpecInvalid = "provider-spec-invalid"
 }
 
 /** A typed failure raised while installing or reading an adapter pack. */

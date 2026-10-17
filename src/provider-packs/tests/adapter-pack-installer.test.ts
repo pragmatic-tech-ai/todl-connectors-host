@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -165,6 +165,56 @@ test("a memo hit whose root was removed is re-resolved (npm runs again)", async 
         assert.equal(second.Root, first.Root);
         assert.ok(existsSync(second.Root));
         assert.deepEqual([...second.Kinds], ["sql"]);
+    });
+});
+
+class RoutingNpm implements INpmCli
+{
+    public constructor(private readonly byName: Map<string, FakeNpm>)
+    {
+    }
+
+    public async Install(cwd: string): Promise<void>
+    {
+        const json = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8"));
+        const name = Object.keys(json.dependencies)[0];
+        await this.byName.get(name)!.Install(cwd);
+    }
+
+    public async AuditSignatures(_cwd: string): Promise<void>
+    {
+    }
+}
+
+test("Invalidate(name) drops the memo so the same spec re-runs npm", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const installer = new AdapterPackInstaller(cacheDir, npm);
+        await installer.Install(Env.PackName, "^1.0.0");
+        assert.equal(npm.Installs, 1);
+        installer.Invalidate(Env.PackName);
+        await installer.Install(Env.PackName, "^1.0.0");
+        assert.equal(npm.Installs, 2);
+    });
+});
+
+test("Invalidate(name) leaves another name's memo untouched", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const other = "@scope/other-pack";
+        const npmA = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const npmB = new FakeNpm(other, "2.0.0", Env.GoodBlock());
+        const installer = new AdapterPackInstaller(cacheDir, new RoutingNpm(new Map([[Env.PackName, npmA], [other, npmB]])));
+        await installer.Install(Env.PackName, "^1.0.0");
+        await installer.Install(other, "^2.0.0");
+        installer.Invalidate(Env.PackName);
+        await installer.Install(Env.PackName, "^1.0.0");
+        await installer.Install(other, "^2.0.0");
+        assert.equal(npmA.Installs, 2);
+        assert.equal(npmB.Installs, 1);
     });
 });
 
