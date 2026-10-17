@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import type { InstalledPack } from "../adapter-pack-installer.js";
 import { NpmAdapterPackProvider } from "../npm-adapter-pack-provider.js";
 import type { NpmAdapterPackProviderOptions } from "../npm-adapter-pack-provider.js";
 import type { INpmCli } from "../npm-cli.js";
+import type { CacheEvictionPolicy } from "../pack-cache.js";
 import type { IPackSandbox, IPackSandboxFactory } from "../sandbox/pack-sandbox.js";
 
 class FakeNpm implements INpmCli
@@ -72,6 +73,7 @@ class FakeSandboxFactory implements IPackSandboxFactory
     public Gate: Promise<void> | undefined;
     public ThrowOnDispose = false;
     public readonly Sandboxes: FakeSandbox[] = [];
+    public CacheDir = "";
 
     public async Launch(_installed: InstalledPack): Promise<IPackSandbox>
     {
@@ -104,6 +106,7 @@ class Env
         const dir = mkdtempSync(join(tmpdir(), "pack-provider-"));
         const npm = new FakeNpm();
         const sandboxes = new FakeSandboxFactory();
+        sandboxes.CacheDir = dir;
         const provider = new NpmAdapterPackProvider({
             cacheDir: dir,
             sandboxFactory: sandboxes,
@@ -380,4 +383,90 @@ test("Dispose during Install rejects the resolve and launches nothing", async ()
         await settled;
         assert.equal(sandboxes.Launches, 0);
     });
+});
+
+test("Invalidate disposes the sandbox, clears the install memo, and the next resolve re-installs and re-launches", async () =>
+{
+    await Env.With(async (provider, npm, sandboxes) =>
+    {
+        const spec = "acme-pack@^1";
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+        await provider.Invalidate("acme-pack");
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
+        const factory = await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: spec });
+        assert.equal(factory.Kind, DataSourceKind.Sql);
+        assert.equal(npm.Installs, 2);
+        assert.equal(sandboxes.Launches, 2);
+        assert.equal(sandboxes.Sandboxes.length, 2);
+        assert.ok(!sandboxes.Sandboxes[1].Disposed);
+    });
+});
+
+test("Invalidate is name-scoped: other packs keep their live sandbox", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "other-pack@^1" });
+        await provider.Invalidate("acme-pack");
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
+        assert.ok(!sandboxes.Sandboxes[1].Disposed);
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "other-pack@^1" });
+        assert.equal(sandboxes.Launches, 2);
+    });
+});
+
+test("Invalidate of an unknown name is a harmless no-op", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        await provider.Invalidate("never-seen");
+        assert.equal(sandboxes.Launches, 0);
+    });
+});
+
+test("GC after a launch evicts idle versions but never the in-use root", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        const base = join(sandboxes.CacheDir, "acme-pack");
+        const idle = join(base, "0.9.0");
+        const newest = join(base, "2.0.0");
+        mkdirSync(idle, { recursive: true });
+        mkdirSync(newest, { recursive: true });
+        writeFileSync(join(newest, ".todl-accessed"), String(Date.now() + 1_000_000));
+        // 1.0.0 (launched, in use) ranks between the future-stamped 2.0.0 and the unmarked 0.9.0,
+        // so MaxVersionsPerPack 1 makes it over-count; only the in-use guard keeps it.
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        const inUse = join(base, "1.0.0");
+        assert.ok(existsSync(inUse));
+        assert.ok(!existsSync(idle));
+        assert.ok(existsSync(newest));
+    }, { eviction: { MaxVersionsPerPack: 1 } });
+});
+
+test("Invalidate runs a GC pass that removes stale idle versions", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        const base = join(sandboxes.CacheDir, "acme-pack");
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        const stale = join(base, "0.5.0");
+        mkdirSync(stale, { recursive: true });
+        await provider.Invalidate("acme-pack");
+        assert.ok(!existsSync(stale));
+        assert.ok(existsSync(join(base, "1.0.0")));
+    }, { eviction: { MaxVersionsPerPack: 1 } });
+});
+
+test("a GC failure never fails a resolve or an invalidate", async () =>
+{
+    const throwing: CacheEvictionPolicy = { get MaxVersionsPerPack(): number { throw new Error("evict failed"); } };
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        const factory = await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        assert.equal(factory.Kind, DataSourceKind.Sql);
+        await provider.Invalidate("acme-pack");
+        assert.ok(sandboxes.Sandboxes[0].Disposed);
+    }, { eviction: throwing });
 });

@@ -69,6 +69,47 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         return sandbox.Factory(request.Kind);
     }
 
+    /**
+     * Hot-upgrade: disposes and forgets every launched sandbox for `name`, clears the installer memo,
+     * and GCs, so the next Resolve re-installs (picking up a newly published version) and re-launches.
+     */
+    public async Invalidate(name: string): Promise<void>
+    {
+        const roots = this.rootsByName.get(name);
+        if (roots !== undefined)
+        {
+            for (const root of roots)
+            {
+                const launch = this.launches.get(root);
+                this.launches.delete(root);
+                if (launch !== undefined)
+                {
+                    await launch.then(s => s.Dispose(), () => undefined).catch(() => undefined);
+                }
+            }
+            this.rootsByName.delete(name);
+        }
+        this.installer.Invalidate(name);
+        await this.Gc();
+    }
+
+    /** Best-effort cache reclaim that never evicts a root with a live sandbox; failures are swallowed. */
+    private async Gc(): Promise<void>
+    {
+        if (this.options.eviction === undefined)
+        {
+            return;
+        }
+        try
+        {
+            await this.cache.Evict(this.options.eviction, new Set(this.launches.keys()));
+        }
+        catch
+        {
+            // best-effort; a reclaim failure never fails a resolve or invalidate
+        }
+    }
+
     private EnsureLive(): void
     {
         if (this.disposed)
@@ -122,7 +163,7 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         return this.options.providerAllowlist.includes(spec.Name) || this.options.providerAllowlist.includes(full);
     }
 
-    private LaunchFor(installed: InstalledPack): Promise<IPackSandbox>
+    private async LaunchFor(installed: InstalledPack): Promise<IPackSandbox>
     {
         const existing = this.launches.get(installed.Root);
         if (existing !== undefined)
@@ -147,7 +188,10 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         });
         this.launches.set(installed.Root, launch);
         this.Track(installed.Name, installed.Root);
-        return launch;
+        const sandbox = await launch;
+        // The root is already in launches, so it is in the in-use set while stale idle versions are pruned.
+        await this.Gc();
+        return sandbox;
     }
 
     private Track(name: string, root: string): void
