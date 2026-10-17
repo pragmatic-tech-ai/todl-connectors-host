@@ -152,6 +152,22 @@ test("concurrent Installs of the same spec run npm once", async () =>
     });
 });
 
+test("a memo hit whose root was removed is re-resolved (npm runs again)", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const installer = new AdapterPackInstaller(cacheDir, npm);
+        const first = await installer.Install(Env.PackName, "^1.0.0");
+        rmSync(first.Root, { recursive: true, force: true });
+        const second = await installer.Install(Env.PackName, "^1.0.0");
+        assert.equal(npm.Installs, 2);
+        assert.equal(second.Root, first.Root);
+        assert.ok(existsSync(second.Root));
+        assert.deepEqual([...second.Kinds], ["sql"]);
+    });
+});
+
 test("an ABI mismatch rejects with AbiMismatch", async () =>
 {
     await Env.With(async cacheDir =>

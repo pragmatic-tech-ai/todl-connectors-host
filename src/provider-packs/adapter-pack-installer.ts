@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js";
 import { AdapterPackManifestReader } from "./adapter-pack-manifest-reader.js";
 import type { INpmCli } from "./npm-cli.js";
+import { PackCache } from "./pack-cache.js";
 
 /** An adapter pack resolved and installed on disk. */
 export interface InstalledPack
@@ -27,22 +28,29 @@ export class AdapterPackInstaller
     private static readonly NamePattern = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
     private static readonly MaxNameLength = 214;
     private static readonly ParentSegment = "..";
-    private static readonly RaceCodes: readonly string[] = ["EEXIST", "ENOTEMPTY", "EPERM"];
 
     private readonly inFlight = new Map<string, Promise<InstalledPack>>();
     private readonly resolved = new Map<string, InstalledPack>();
 
+    private readonly cache: PackCache;
+
     public constructor(private readonly cacheDir: string, private readonly npm: INpmCli, private readonly requireSignatures: boolean = false)
     {
+        this.cache = new PackCache(cacheDir);
     }
 
-    public Install(name: string, range: string): Promise<InstalledPack>
+    public async Install(name: string, range: string): Promise<InstalledPack>
     {
         const key = `${name}@${range}`;
         const cached = this.resolved.get(key);
         if (cached !== undefined)
         {
-            return Promise.resolve(cached);
+            if (await this.cache.Has(cached.Root))
+            {
+                await this.cache.Touch(cached.Root);
+                return cached;
+            }
+            this.resolved.delete(key);
         }
         const existing = this.inFlight.get(key);
         if (existing !== undefined)
@@ -81,24 +89,8 @@ export class AdapterPackInstaller
             const tmpRead = await AdapterPackManifestReader.Read(tmpPackDir);
             AdapterPackInstaller.EnsureEntryInside(tmpPackDir, tmpRead.manifest.entry, name);
 
-            const root = join(this.cacheDir, name, version);
-            if (!(await this.Exists(root)))
-            {
-                await mkdir(dirname(root), { recursive: true });
-                try
-                {
-                    await rename(tmp, root);
-                    promoted = true;
-                }
-                catch (err)
-                {
-                    const code = (err as NodeJS.ErrnoException).code ?? "";
-                    if (!AdapterPackInstaller.RaceCodes.includes(code) || !(await this.Exists(root)))
-                    {
-                        throw err;
-                    }
-                }
-            }
+            const root = this.cache.PathFor(name, version);
+            promoted = await this.cache.Promote(tmp, root);
             const packDir = join(root, AdapterPackInstaller.NodeModules, name);
             const { manifest } = await AdapterPackManifestReader.Read(packDir);
             AdapterPackInstaller.EnsureEntryInside(packDir, manifest.entry, name);
@@ -154,18 +146,5 @@ export class AdapterPackInstaller
             throw new AdapterPackError(AdapterPackErrorKind.LockfileUnreadable, `${file} does not pin ${name}`);
         }
         return version;
-    }
-
-    private async Exists(path: string): Promise<boolean>
-    {
-        try
-        {
-            await stat(path);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }
