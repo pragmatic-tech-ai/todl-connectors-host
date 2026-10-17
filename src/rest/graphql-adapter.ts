@@ -1,4 +1,4 @@
-import { WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { ExternalRecord, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
@@ -71,6 +71,8 @@ export class GraphQlName
 export class GraphQlAdapter implements IDataSourceAdapter
 {
     private static readonly WriteNotConfiguredReason = "graphql write not configured";
+    private static readonly TransactionUnsupportedReason = "transactional write not supported by this connector";
+    private static readonly OptimisticUnsupportedReason = "optimistic write not supported by this connector (graphql cannot version)";
     private static readonly DataKey = "data";
     private static readonly ErrorsKey = "errors";
     private static readonly RequestFailedMessage = "graphql request failed";
@@ -94,6 +96,18 @@ export class GraphQlAdapter implements IDataSourceAdapter
     {
     }
 
+    /** Whether this adapter can enforce an optimistic version guard: no, a GraphQL mutation has no version precondition. */
+    public get CanVersion(): boolean
+    {
+        return false;
+    }
+
+    /** Whether this adapter can run a batch inside a backend transaction: no, each mutation is its own request. */
+    public get CanTransact(): boolean
+    {
+        return false;
+    }
+
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
         if (request.Source !== this.connection.source) return [];
@@ -107,43 +121,90 @@ export class GraphQlAdapter implements IDataSourceAdapter
         return ExternalQuery.Apply(records, request);
     }
 
+    /**
+     * GraphQL can neither transact nor version, so a Transactional or Optimistic batch comes back wholly
+     * Unsupported at apply (defending the plan-build block from Task 5, never a silent downgrade). A
+     * LastWriteWins batch runs resiliently: a per-op driver/transport fault becomes a WriteFailure{Error}
+     * and the loop continues. Identifier guards on IdKey stay hard errors (injection safety).
+     */
     public async Apply(batch: WriteBatch): Promise<WriteResult>
     {
+        if (batch.Atomicity === WriteAtomicity.Transactional)
+        {
+            return GraphQlAdapter.AllUnsupported(batch, GraphQlAdapter.TransactionUnsupportedReason);
+        }
+        if (batch.Concurrency === WriteConcurrency.Optimistic)
+        {
+            return GraphQlAdapter.AllUnsupported(batch, GraphQlAdapter.OptimisticUnsupportedReason);
+        }
+        GraphQlName.Validate(batch.IdKey);
         let applied = 0;
-        const conflicts: WriteFailure[] = [];
+        const failures: WriteFailure[] = [];
         for (const op of batch.Operations)
         {
-            if (await this.ApplyOne(batch, op)) applied++;
-            else conflicts.push({ Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: GraphQlAdapter.WriteNotConfiguredReason });
+            const failure = await this.ApplyOne(batch, op);
+            if (failure === undefined)
+            {
+                applied++;
+            }
+            else
+            {
+                failures.push(failure);
+            }
         }
-        return { Applied: applied, Failures: conflicts };
+        return { Applied: applied, Failures: failures };
     }
 
     public async Dispose(): Promise<void>
     {
     }
 
-    private async ApplyOne(batch: WriteBatch, op: WriteOperation): Promise<boolean>
+    private static AllUnsupported(batch: WriteBatch, reason: string): WriteResult
     {
-        if (op.Kind === WriteOperationKind.Delete)
+        return {
+            Applied: 0,
+            Failures: batch.Operations.map(op => ({ Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: reason })),
+        };
+    }
+
+    /**
+     * Applies one op resiliently: a not-configured mutation is Unsupported (the capability is absent),
+     * a thrown driver/transport fault is Error, success returns undefined.
+     */
+    private async ApplyOne(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
+    {
+        try
         {
-            if (this.connection.deleteMutation === undefined) return false;
-            // Assumes a schema convention: id is an ID! argument (richer/configurable write types are a documented deferral).
-            const document = GraphQlAdapter.DeletePrefix + GraphQlName.Validate(this.connection.deleteMutation) + GraphQlAdapter.DeleteArgs;
+            if (op.Kind === WriteOperationKind.Delete)
+            {
+                if (this.connection.deleteMutation === undefined)
+                {
+                    return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.WriteNotConfiguredReason };
+                }
+                // Assumes a schema convention: id is an ID! argument (richer/configurable write types are a documented deferral).
+                const document = GraphQlAdapter.DeletePrefix + GraphQlName.Validate(this.connection.deleteMutation) + GraphQlAdapter.DeleteArgs;
+                const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
+                    { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.IdVariable]: op.Key } });
+                GraphQlAdapter.EnsureOk(response);
+                return undefined;
+            }
+            if (this.connection.upsertMutation === undefined)
+            {
+                return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.WriteNotConfiguredReason };
+            }
+            // Assumes a schema convention: a JSON! input scalar (richer/configurable write types are a documented deferral).
+            const document = GraphQlAdapter.UpsertPrefix + GraphQlName.Validate(this.connection.upsertMutation) + GraphQlAdapter.UpsertArgs
+                + GraphQlName.Validate(batch.IdKey) + GraphQlAdapter.UpsertSuffix;
+            const input = { ...op.Fields, [batch.IdKey]: op.Key };
             const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
-                { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.IdVariable]: op.Key } });
+                { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.InputVariable]: input } });
             GraphQlAdapter.EnsureOk(response);
-            return true;
+            return undefined;
         }
-        if (this.connection.upsertMutation === undefined) return false;
-        // Assumes a schema convention: a JSON! input scalar (richer/configurable write types are a documented deferral).
-        const document = GraphQlAdapter.UpsertPrefix + GraphQlName.Validate(this.connection.upsertMutation) + GraphQlAdapter.UpsertArgs
-            + GraphQlName.Validate(batch.IdKey) + GraphQlAdapter.UpsertSuffix;
-        const input = { ...op.Fields, [batch.IdKey]: op.Key };
-        const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
-            { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.InputVariable]: input } });
-        GraphQlAdapter.EnsureOk(response);
-        return true;
+        catch (error)
+        {
+            return { Key: op.Key, Kind: WriteFailureKind.Error, Reason: GraphQlAdapter.ErrorReason(error) };
+        }
     }
 
     private QueryDocument(fields: readonly string[]): string
@@ -158,6 +219,11 @@ export class GraphQlAdapter implements IDataSourceAdapter
         const names = new Set<string>(request.Fields);
         for (const term of request.Where?.All ?? []) names.add(term.Field);
         return [...names];
+    }
+
+    private static ErrorReason(error: unknown): string
+    {
+        return error instanceof Error ? error.message : String(error);
     }
 
     /** Throws a secret-free error for a non-2xx status or a GraphQL errors array. */
