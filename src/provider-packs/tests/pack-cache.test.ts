@@ -43,7 +43,7 @@ test("Promote renames tmp into place and Has becomes true", async () =>
         const cache = new PackCache(cacheDir);
         const tmp = join(cacheDir, ".tmp-a");
         Env.Seed(tmp, "first");
-        const root = cache.PathFor("p", "1.0.0");
+        const root = cache.PathFor("p", "1.0.0", false);
         assert.equal(await cache.Promote(tmp, root), true);
         assert.equal(await cache.Has(root), true);
         assert.equal(existsSync(tmp), false);
@@ -55,7 +55,7 @@ test("a second Promote into an existing root returns false and keeps the first r
     await Env.With(async cacheDir =>
     {
         const cache = new PackCache(cacheDir);
-        const root = cache.PathFor("p", "1.0.0");
+        const root = cache.PathFor("p", "1.0.0", false);
         const winner = join(cacheDir, ".tmp-a");
         const loser = join(cacheDir, ".tmp-b");
         Env.Seed(winner, "first");
@@ -73,7 +73,7 @@ test("Touch creates the access marker", async () =>
     await Env.With(async cacheDir =>
     {
         const cache = new PackCache(cacheDir);
-        const root = cache.PathFor("p", "1.0.0");
+        const root = cache.PathFor("p", "1.0.0", false);
         mkdirSync(root, { recursive: true });
         await cache.Touch(root);
         assert.ok(existsSync(join(root, ".todl-accessed")));
@@ -94,7 +94,7 @@ class EvictEnv
 
     public static Seed(cache: PackCache, name: string, version: string, ageMs: number | undefined): string
     {
-        const root = cache.PathFor(name, version);
+        const root = cache.PathFor(name, version, false);
         mkdirSync(root, { recursive: true });
         if (ageMs !== undefined)
         {
@@ -214,7 +214,7 @@ test("Promote stamps the access marker inside the promoted root atomically with 
         const cache = new PackCache(cacheDir);
         const tmp = join(cacheDir, ".tmp-a");
         Env.Seed(tmp, "first");
-        const root = cache.PathFor("p", "1.0.0");
+        const root = cache.PathFor("p", "1.0.0", false);
         assert.equal(await cache.Promote(tmp, root), true);
         const stamp = Number(readFileSync(join(root, ".todl-accessed"), "utf8"));
         assert.ok(Number.isFinite(stamp) && stamp > 0, "marker must exist and be a timestamp right after promote");
@@ -303,8 +303,35 @@ test("Promote recreates a parent dir pruned just before the rename and still suc
         const cache = new PruningCache(cacheDir);
         const tmp = join(cacheDir, ".tmp-a");
         Env.Seed(tmp, "first");
-        const root = cache.PathFor("@scope/p", "1.0.0");
+        const root = cache.PathFor("@scope/p", "1.0.0", false);
         assert.equal(await cache.Promote(tmp, root), true);
         assert.equal(readFileSync(join(root, "marker.txt"), "utf8"), "first");
+    });
+});
+
+test("Evict treats a ~scripts root and the plain root of one version as independent roots", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const plain = cache.PathFor("a", "1.0.0", false);
+        const scripted = cache.PathFor("a", "1.0.0", true);
+        const seed = (root: string, ageMs: number): void =>
+        {
+            mkdirSync(root, { recursive: true });
+            writeFileSync(join(root, ".todl-accessed"), String(Date.now() - ageMs));
+        };
+
+        seed(plain, 2 * EvictEnv.Day);
+        seed(scripted, 1 * EvictEnv.Day);
+        const removed = await cache.Evict({ MaxVersionsPerPack: 1 }, new Set<string>());
+        assert.deepEqual([...removed], [plain]);
+        assert.equal(existsSync(plain), false);
+        assert.equal(existsSync(scripted), true);
+
+        seed(plain, 2 * EvictEnv.Day);
+        const removedAgain = await cache.Evict({ MaxVersionsPerPack: 0 }, new Set<string>([scripted]));
+        assert.deepEqual([...removedAgain], [plain]);
+        assert.equal(existsSync(scripted), true);
     });
 });
