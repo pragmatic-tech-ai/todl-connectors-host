@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
@@ -88,11 +88,15 @@ test("wrong-typed names reads as empty and invalid entries are filtered", async 
     assert.deepEqual(await fx.Create([]).List(), ["ok"]);
 });
 
-test("concurrent Allow keeps the file valid JSON with at least one name", async () =>
+test("concurrent Allow/Deny on one instance are serialized deterministically", async () =>
 {
     const list = fx.Create([]);
-    await Promise.all([list.Allow("a"), list.Allow("b")]);
-    const parsed = JSON.parse(readFileSync(fx.FilePath, AllowlistFixture.Utf8)) as { names: string[] };
-    assert.ok(parsed.names.includes("a") || parsed.names.includes("b"));
-    // Known limitation: simple read-modify-write is last-writer-wins, so one concurrent Allow may be lost.
+    await Promise.all([list.Allow("a"), list.Allow("b"), list.Allow("c"), list.Deny("a")]);
+    assert.deepEqual(await fx.Create([]).List(), ["b", "c"]);
+});
+
+test("a non-ENOENT read error rejects instead of reading the seed", async () =>
+{
+    mkdirSync(fx.FilePath);
+    await assert.rejects(fx.Create(["x"]).Has("x"));
 });
