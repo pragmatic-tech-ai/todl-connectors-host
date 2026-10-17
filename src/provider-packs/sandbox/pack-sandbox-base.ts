@@ -21,6 +21,7 @@ export class SandboxEvents
     public static readonly Message = "message";
     public static readonly Error = "error";
     public static readonly Exit = "exit";
+    public static readonly Disconnect = "disconnect";
 }
 
 /** Transport-agnostic core of a launched pack sandbox: monotonic request correlation, call timeout,

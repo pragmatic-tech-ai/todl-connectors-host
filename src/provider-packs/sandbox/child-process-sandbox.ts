@@ -32,12 +32,21 @@ export class ChildProcessSandboxFactory implements IPackSandboxFactory
     private static readonly DefaultStartupTimeoutMs = 30000;
     private static readonly LaunchTimeoutError = "pack child did not report ready within the startup timeout";
     private static readonly EarlyExitError = "pack child exited before reporting ready";
+    private static readonly ForkFailedPrefix = "pack child could not be forked: ";
     private static readonly MissingErrorText = "pack child reported a startup failure";
 
     public async Launch(installed: InstalledPack, options?: PackSandboxOptions): Promise<IPackSandbox>
     {
         const plan = ChildProcessSandboxFactory.BuildForkPlan(installed, options ?? {});
-        const child = fork(plan.entryPath, [], plan.forkOptions);
+        let child: ChildProcess;
+        try
+        {
+            child = fork(plan.entryPath, [], plan.forkOptions);
+        }
+        catch (err)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, `${ChildProcessSandboxFactory.ForkFailedPrefix}${(err as Error).message}`);
+        }
         const startupTimeoutMs = options?.startupTimeoutMs ?? ChildProcessSandboxFactory.DefaultStartupTimeoutMs;
         return ChildProcessSandboxFactory.AwaitReady(child, options ?? {}, startupTimeoutMs);
     }
@@ -177,6 +186,9 @@ export class ChildProcessSandbox extends PackSandboxBase
     private static readonly CrashReason = "pack child process crashed";
     private static readonly ExitReason = "pack child process exited";
     private static readonly ChannelClosedError = "pack child IPC channel is closed";
+    private static readonly DisconnectGraceMs = 100;
+    private static readonly DisconnectReason = "pack child IPC disconnected";
+    private static readonly SendFailedPrefix = "pack child IPC send failed: ";
     private static readonly ForceKillMs = 2000;
     private static readonly SigTerm = "SIGTERM";
     private static readonly SigKill = "SIGKILL";
@@ -189,6 +201,17 @@ export class ChildProcessSandbox extends PackSandboxBase
         {
             this.OnChannelError(`${ChildProcessSandbox.CrashReason}: ${err.message}`);
         });
+        this.child.on(SandboxEvents.Disconnect, (): void =>
+        {
+            // Not OnChannelExit: the process may linger, so HasExited must stay false until a real exit.
+            // A dying child emits "disconnect" just before "exit"; a short grace lets the exit (with its
+            // code/signal) name the failure first, since the first MarkDead wins.
+            const grace = setTimeout((): void =>
+            {
+                this.OnChannelError(ChildProcessSandbox.DisconnectReason);
+            }, ChildProcessSandbox.DisconnectGraceMs);
+            grace.unref();
+        });
         this.child.on(SandboxEvents.Exit, (code: number | null, signal: NodeJS.Signals | null): void =>
         {
             this.OnChannelExit(`${ChildProcessSandbox.ExitReason} (code ${code ?? "null"}, signal ${signal ?? "none"})`);
@@ -197,10 +220,19 @@ export class ChildProcessSandbox extends PackSandboxBase
 
     protected Post(message: PackWorkerRequest): void
     {
-        if (this.child.send(message) === false)
+        if (!this.child.connected)
         {
             throw new Error(ChildProcessSandbox.ChannelClosedError);
         }
+        // A bare `false` return only signals backpressure (the message is still queued), so it is benign;
+        // a real send failure arrives asynchronously via the callback and marks the channel dead.
+        this.child.send(message, (err: Error | null): void =>
+        {
+            if (err !== null)
+            {
+                this.OnChannelError(`${ChildProcessSandbox.SendFailedPrefix}${err.message}`);
+            }
+        });
     }
 
     protected async Terminate(): Promise<void>

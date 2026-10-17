@@ -188,3 +188,94 @@ test("Evict on a missing cache dir removes nothing", async () =>
         assert.deepEqual([...removed], []);
     });
 });
+
+class LockedCache extends PackCache
+{
+    public constructor(cacheDir: string, private readonly lockedRoot: string)
+    {
+        super(cacheDir);
+    }
+
+    protected override async RemoveTree(root: string): Promise<void>
+    {
+        if (root === this.lockedRoot)
+        {
+            throw new Error("EBUSY: resource busy or locked");
+        }
+        await super.RemoveTree(root);
+    }
+}
+
+test("Promote stamps the access marker inside the promoted root atomically with the tree", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const tmp = join(cacheDir, ".tmp-a");
+        Env.Seed(tmp, "first");
+        const root = cache.PathFor("p", "1.0.0");
+        assert.equal(await cache.Promote(tmp, root), true);
+        const stamp = Number(readFileSync(join(root, ".todl-accessed"), "utf8"));
+        assert.ok(Number.isFinite(stamp) && stamp > 0, "marker must exist and be a timestamp right after promote");
+    });
+});
+
+test("Evict does not let an in-use root occupy a keep-slot", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const pinned = EvictEnv.Seed(cache, "a", "3.0.0", 1000);
+        const idleNew = EvictEnv.Seed(cache, "a", "2.0.0", 2 * EvictEnv.Day);
+        const idleOld = EvictEnv.Seed(cache, "a", "1.0.0", 3 * EvictEnv.Day);
+        const removed = await cache.Evict({ MaxVersionsPerPack: 1 }, new Set<string>([pinned]));
+        assert.deepEqual([...removed], [idleOld]);
+        assert.equal(existsSync(pinned), true);
+        assert.equal(existsSync(idleNew), true, "the newest idle version keeps the single keep-slot");
+    });
+});
+
+test("Evict skips an un-removable root without throwing and still removes the others", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const seeder = new PackCache(cacheDir);
+        const locked = EvictEnv.Seed(seeder, "a", "1.0.0", 9 * EvictEnv.Day);
+        const stale = EvictEnv.Seed(seeder, "a", "2.0.0", 8 * EvictEnv.Day);
+        const removed = await new LockedCache(cacheDir, locked).Evict({ MaxAgeMs: EvictEnv.Day }, new Set<string>());
+        assert.deepEqual([...removed], [stale]);
+        assert.equal(existsSync(locked), true);
+    });
+});
+
+test("Evict ignores a stray file under the cache and under a pack dir, and keeps that pack dir", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        const stale = EvictEnv.Seed(cache, "a", "1.0.0", 9 * EvictEnv.Day);
+        writeFileSync(join(cacheDir, "stray.txt"), "x");
+        writeFileSync(join(cacheDir, "a", "notes.txt"), "x");
+        const removed = await cache.Evict({ MaxAgeMs: EvictEnv.Day }, new Set<string>());
+        assert.deepEqual([...removed], [stale]);
+        assert.equal(existsSync(join(cacheDir, "stray.txt")), true);
+        assert.equal(existsSync(join(cacheDir, "a", "notes.txt")), true);
+    });
+});
+
+test("Evict prunes an emptied name dir and an emptied scope dir, but keeps a scope that still has packs", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const cache = new PackCache(cacheDir);
+        EvictEnv.Seed(cache, "plain", "1.0.0", 9 * EvictEnv.Day);
+        EvictEnv.Seed(cache, "@gone/p", "1.0.0", 9 * EvictEnv.Day);
+        EvictEnv.Seed(cache, "@kept/p", "1.0.0", 9 * EvictEnv.Day);
+        const survivor = EvictEnv.Seed(cache, "@kept/q", "1.0.0", 1000);
+        await cache.Evict({ MaxAgeMs: EvictEnv.Day }, new Set<string>());
+        assert.equal(existsSync(join(cacheDir, "plain")), false);
+        assert.equal(existsSync(join(cacheDir, "@gone")), false);
+        assert.equal(existsSync(join(cacheDir, "@kept", "p")), false);
+        assert.equal(existsSync(survivor), true);
+    });
+});

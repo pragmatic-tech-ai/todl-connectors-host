@@ -13,7 +13,9 @@ export enum AdapterPackErrorKind
     PackCallFailed = "pack-call-failed",
     SandboxTimeout = "sandbox-timeout",
     ProviderNotAllowed = "provider-not-allowed",
-    ProviderSpecInvalid = "provider-spec-invalid"
+    ProviderSpecInvalid = "provider-spec-invalid",
+    ProviderDisposed = "provider-disposed",
+    SignatureCheckUnavailable = "signature-check-unavailable"
 }
 
 /** A typed failure raised while installing or reading an adapter pack. */

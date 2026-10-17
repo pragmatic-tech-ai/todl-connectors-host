@@ -1,2 +1,5 @@
 node_modules
 dist
+!fixtures/adapter-pack-example/dist
+!fixtures/adapter-pack-example/dist/**
+fixtures/adapter-pack-example/package-lock.json

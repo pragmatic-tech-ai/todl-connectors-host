@@ -16,6 +16,7 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
     private static readonly DefaultStartupTimeoutMs = 30000;
     private static readonly LaunchTimeoutError = "pack worker did not report ready within the startup timeout";
     private static readonly EarlyExitError = "pack worker exited before reporting ready";
+    private static readonly SpawnFailedPrefix = "pack worker could not be started: ";
     private static readonly MissingErrorText = "pack worker reported a startup failure";
 
     public async Launch(installed: InstalledPack, options?: PackSandboxOptions): Promise<IPackSandbox>
@@ -23,12 +24,20 @@ export class WorkerThreadSandboxFactory implements IPackSandboxFactory
         const selfIsTs = import.meta.url.endsWith(WorkerThreadSandboxFactory.TsSuffix);
         const entryUrl = new URL(selfIsTs ? WorkerThreadSandboxFactory.TsEntry : WorkerThreadSandboxFactory.JsEntry, import.meta.url);
         const execArgv = entryUrl.pathname.endsWith(WorkerThreadSandboxFactory.TsSuffix) ? [...WorkerThreadSandboxFactory.TsxArgs] : [];
-        const worker = new Worker(entryUrl,
+        let worker: Worker;
+        try
         {
-            workerData: { entry: installed.Entry },
-            execArgv,
-            resourceLimits: options?.resourceLimits
-        });
+            worker = new Worker(entryUrl,
+            {
+                workerData: { entry: installed.Entry },
+                execArgv,
+                resourceLimits: options?.resourceLimits
+            });
+        }
+        catch (err)
+        {
+            throw new AdapterPackError(AdapterPackErrorKind.SandboxLaunchFailed, `${WorkerThreadSandboxFactory.SpawnFailedPrefix}${(err as Error).message}`);
+        }
         const startupTimeoutMs = options?.startupTimeoutMs ?? WorkerThreadSandboxFactory.DefaultStartupTimeoutMs;
         return WorkerThreadSandboxFactory.AwaitReady(worker, options ?? {}, startupTimeoutMs);
     }

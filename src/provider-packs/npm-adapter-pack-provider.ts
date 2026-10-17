@@ -64,6 +64,10 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         const spec = NpmAdapterPackProvider.ParseSpec(request.Provider);
         this.Admit(spec);
         const installed = await this.installer.Install(spec.Name, spec.Range);
+        // Narrow, benign window: an Invalidate(name) landing while this Install was in flight leaves the
+        // installer memo unpopulated for this pack, yet we still launch and track a sandbox for it. That is
+        // self-healing: the launch is tracked under rootsByName, so the next Invalidate/Dispose disposes it,
+        // and the next Resolve re-runs the install because the memo was never set.
         this.EnsureLive();
         const sandbox = await this.LaunchFor(installed);
         return sandbox.Factory(request.Kind);
@@ -102,7 +106,10 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
         }
         try
         {
-            await this.cache.Evict(this.options.eviction, new Set(this.launches.keys()));
+            // In use = launched roots plus roots the installer has resolved but that may not be launched yet,
+            // so a Gc racing a Resolve between Install returning and LaunchFor registering cannot rm it.
+            const inUse = new Set<string>([...this.launches.keys(), ...this.installer.ResolvedRoots()]);
+            await this.cache.Evict(this.options.eviction, inUse);
         }
         catch
         {
@@ -114,7 +121,7 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
     {
         if (this.disposed)
         {
-            throw new AdapterPackError(AdapterPackErrorKind.SandboxCrashed, NpmAdapterPackProvider.DisposedMessage);
+            throw new AdapterPackError(AdapterPackErrorKind.ProviderDisposed, NpmAdapterPackProvider.DisposedMessage);
         }
     }
 
@@ -175,7 +182,7 @@ export class NpmAdapterPackProvider implements IDataSourceAdapterProvider
             if (this.disposed)
             {
                 await sandbox.Dispose().catch(() => undefined);
-                throw new AdapterPackError(AdapterPackErrorKind.SandboxCrashed, NpmAdapterPackProvider.DisposedMessage);
+                throw new AdapterPackError(AdapterPackErrorKind.ProviderDisposed, NpmAdapterPackProvider.DisposedMessage);
             }
             return sandbox;
         }).catch((err: unknown) =>

@@ -19,27 +19,42 @@ export class NpmCli implements INpmCli
     private static readonly PosixCommand = "npm";
     private static readonly WindowsPlatform = "win32";
     private static readonly NpmCliScriptSegments: readonly string[] = ["node_modules", "npm", "bin", "npm-cli.js"];
+    private static readonly NpmExecPathVar = "npm_execpath";
+    private static readonly NpmCliScriptName = "npm-cli.js";
     private static readonly DefaultTimeoutMs = 120000;
-    private static readonly Stdio: ["ignore", "ignore", "pipe"] = ["ignore", "ignore", "pipe"];
+    private static readonly Stdio: ["ignore", "pipe", "pipe"] = ["ignore", "pipe", "pipe"];
     private static readonly KillSignal = "SIGKILL";
     private static readonly InstallArgs: readonly string[] = ["install", "--no-audit", "--no-fund"];
     private static readonly AuditArgs: readonly string[] = ["audit", "signatures"];
     private static readonly InstallLabel = "npm install";
     private static readonly AuditLabel = "npm audit signatures";
-    private static readonly StderrTailChars = 2000;
+    private static readonly OutputTailChars = 2000;
     private static readonly ErrorEvent = "error";
     private static readonly CloseEvent = "close";
     private static readonly DataEvent = "data";
+    private static readonly LaunchSeparator = " ";
+    private static readonly OutputJoin = "\n";
+    /** Registry/network/tooling failures from `npm audit signatures` that say nothing about the pack's integrity. */
+    private static readonly InfraPattern = /ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EPROTO|socket hang up|network|\bE5\d\d\b|unknown command|not supported/i;
+    /** Output that affirmatively reports a bad/missing signature or attestation. */
+    private static readonly TamperPattern = /invalid (registry )?signature|missing (registry )?signature|invalid attestation|have invalid|have missing/i;
 
     /**
      * Resolves how to start npm without a shell. Node refuses to spawn a .cmd directly on Windows (EINVAL),
-     * so there we run npm's own npm-cli.js under the current node when it sits beside it; npm.cmd is the fallback.
+     * so there we run npm's own npm-cli.js under the current node: first the script named by `npm_execpath`
+     * (set when we run under npm/Volta shims, whose node is not beside npm), then the one beside the current
+     * node; npm.cmd is the last fallback.
      */
-    private static ResolveLaunch(): { Command: string; Prefix: readonly string[] }
+    public static ResolveLaunch(): { Command: string; Prefix: readonly string[] }
     {
         if (process.platform !== NpmCli.WindowsPlatform)
         {
             return { Command: NpmCli.PosixCommand, Prefix: [] };
+        }
+        const execPath = process.env[NpmCli.NpmExecPathVar];
+        if (execPath !== undefined && execPath.endsWith(NpmCli.NpmCliScriptName) && existsSync(execPath))
+        {
+            return { Command: process.execPath, Prefix: [execPath] };
         }
         const script = join(dirname(process.execPath), ...NpmCli.NpmCliScriptSegments);
         if (existsSync(script))
@@ -58,28 +73,58 @@ export class NpmCli implements INpmCli
 
     public Install(cwd: string): Promise<void>
     {
-        return this.RunNpm(cwd, NpmCli.InstallArgs, NpmCli.InstallLabel, AdapterPackErrorKind.InstallFailed);
+        return this.RunNpm(cwd, NpmCli.InstallArgs, NpmCli.InstallLabel, AdapterPackErrorKind.InstallFailed, () => AdapterPackErrorKind.InstallFailed);
     }
 
     public AuditSignatures(cwd: string): Promise<void>
     {
-        return this.RunNpm(cwd, NpmCli.AuditArgs, NpmCli.AuditLabel, AdapterPackErrorKind.SignatureInvalid);
+        return this.RunNpm(cwd, NpmCli.AuditArgs, NpmCli.AuditLabel, AdapterPackErrorKind.SignatureCheckUnavailable, NpmCli.ClassifyAuditFailure);
     }
 
-    private RunNpm(cwd: string, args: readonly string[], label: string, failure: AdapterPackErrorKind): Promise<void>
+    /** Pure: a non-zero audit exit is tampering only when the output says so; registry/tooling trouble is "unavailable" (still fail-closed). */
+    public static ClassifyAuditFailure(output: string): AdapterPackErrorKind
+    {
+        if (NpmCli.TamperPattern.test(output))
+        {
+            return AdapterPackErrorKind.SignatureInvalid;
+        }
+        if (NpmCli.InfraPattern.test(output))
+        {
+            return AdapterPackErrorKind.SignatureCheckUnavailable;
+        }
+        return AdapterPackErrorKind.SignatureInvalid;
+    }
+
+    private static Tail(text: string): string
+    {
+        return text.slice(-NpmCli.OutputTailChars);
+    }
+
+    private RunNpm(
+        cwd: string,
+        args: readonly string[],
+        label: string,
+        infraFailure: AdapterPackErrorKind,
+        classifyExit: (output: string) => AdapterPackErrorKind): Promise<void>
     {
         return new Promise<void>((resolve, reject) =>
         {
+            let stdout = "";
             let stderr = "";
             const launch = NpmCli.ResolveLaunch();
+            const launched = [launch.Command, ...launch.Prefix].join(NpmCli.LaunchSeparator);
             // Install/postinstall scripts run on the host at install time by design (mitigated upstream
             // by the provider allowlist + integrity verification), so --ignore-scripts is deliberately not set.
             const child = spawn(launch.Command, [...launch.Prefix, ...args], { cwd, env: process.env, stdio: NpmCli.Stdio });
             const timer = setTimeout(() =>
             {
                 child.kill(NpmCli.KillSignal);
-                reject(new AdapterPackError(failure, `${label} timed out after ${this.timeoutMs}ms in ${cwd}`));
+                reject(new AdapterPackError(infraFailure, `${label} (${launched}) timed out after ${this.timeoutMs}ms in ${cwd}: ${NpmCli.Tail(stderr)}`));
             }, this.timeoutMs);
+            child.stdout?.on(NpmCli.DataEvent, (chunk: Buffer) =>
+            {
+                stdout += chunk.toString();
+            });
             child.stderr?.on(NpmCli.DataEvent, (chunk: Buffer) =>
             {
                 stderr += chunk.toString();
@@ -87,7 +132,7 @@ export class NpmCli implements INpmCli
             child.on(NpmCli.ErrorEvent, (err: Error) =>
             {
                 clearTimeout(timer);
-                reject(new AdapterPackError(failure, `${label} failed to start in ${cwd}: ${err.message}`));
+                reject(new AdapterPackError(infraFailure, `${label} failed to start (${launched}) in ${cwd}: ${err.message}`));
             });
             child.on(NpmCli.CloseEvent, (code: number | null) =>
             {
@@ -97,8 +142,8 @@ export class NpmCli implements INpmCli
                     resolve();
                     return;
                 }
-                const tail = stderr.slice(-NpmCli.StderrTailChars);
-                reject(new AdapterPackError(failure, `${label} exited ${code} in ${cwd}: ${tail}`));
+                const output = `${stdout}${NpmCli.OutputJoin}${stderr}`;
+                reject(new AdapterPackError(classifyExit(output), `${label} exited ${code} in ${cwd}: stdout: ${NpmCli.Tail(stdout)} stderr: ${NpmCli.Tail(stderr)}`));
             });
         });
     }

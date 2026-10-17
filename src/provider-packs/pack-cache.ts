@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 /** Bounds applied by {@link PackCache.Evict}; an omitted bound is not enforced. */
@@ -62,6 +62,9 @@ export class PackCache
         if (!(await this.Has(root)))
         {
             await mkdir(dirname(root), { recursive: true });
+            // Stamp the access marker inside tmp so it promotes atomically with the tree: a concurrent
+            // Evict can never see the fresh root without a marker (which would rank it oldest).
+            await this.Touch(tmp);
             try
             {
                 await rename(tmp, root);
@@ -76,7 +79,10 @@ export class PackCache
                 }
             }
         }
-        await this.Touch(root);
+        if (!promoted)
+        {
+            await this.Touch(root);
+        }
         return promoted;
     }
 
@@ -98,16 +104,23 @@ export class PackCache
                 entries.push({ root, accessed: await this.ReadAccessed(root) });
             }
             entries.sort((a, b) => b.accessed - a.accessed);
-            for (let i = 0; i < entries.length; i++)
+            // In-use roots are never removable and do not occupy a keep-slot, so they are ranked out.
+            let slot = 0;
+            for (const entry of entries)
             {
-                const entry = entries[i];
-                const overCount = policy.MaxVersionsPerPack !== undefined && i >= policy.MaxVersionsPerPack;
+                if (inUse.has(entry.root))
+                {
+                    continue;
+                }
+                const overCount = policy.MaxVersionsPerPack !== undefined && slot >= policy.MaxVersionsPerPack;
+                slot++;
                 const tooOld = policy.MaxAgeMs !== undefined && now - entry.accessed > policy.MaxAgeMs;
-                if ((overCount || tooOld) && !inUse.has(entry.root) && await this.TryRemove(entry.root))
+                if ((overCount || tooOld) && await this.TryRemove(entry.root))
                 {
                     removed.push(entry.root);
                 }
             }
+            await this.PruneEmptyParents(name);
         }
         return removed;
     }
@@ -158,11 +171,44 @@ export class PackCache
         }
     }
 
+    /** Removes the emptied `<name>/` dir and, for scoped packs, its emptied `@scope/` dir; non-empty dirs are left alone. */
+    private async PruneEmptyParents(name: string): Promise<void>
+    {
+        const nameDir = join(this.cacheDir, name);
+        const scopeDir = dirname(nameDir);
+        const scoped = name.startsWith(PackCache.ScopePrefix);
+        try
+        {
+            await rmdir(nameDir);
+        }
+        catch
+        {
+            return;
+        }
+        if (scoped)
+        {
+            try
+            {
+                await rmdir(scopeDir);
+            }
+            catch
+            {
+                // other packs still live under this scope
+            }
+        }
+    }
+
+    /** Deletes a root tree; overridable so tests can simulate an un-removable (locked) root. */
+    protected async RemoveTree(root: string): Promise<void>
+    {
+        await rm(root, { recursive: true, force: true });
+    }
+
     private async TryRemove(root: string): Promise<boolean>
     {
         try
         {
-            await rm(root, { recursive: true, force: true });
+            await this.RemoveTree(root);
             return true;
         }
         catch

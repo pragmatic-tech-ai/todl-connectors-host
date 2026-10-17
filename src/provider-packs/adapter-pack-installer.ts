@@ -42,7 +42,7 @@ export class AdapterPackInstaller
 
     public async Install(name: string, range: string): Promise<InstalledPack>
     {
-        const key = `${name}@${range}`;
+        const key = `${name}${AdapterPackInstaller.SpecSeparator}${range}`;
         const cached = this.resolved.get(key);
         if (cached !== undefined)
         {
@@ -53,6 +53,10 @@ export class AdapterPackInstaller
             }
             this.resolved.delete(key);
         }
+        // Two ranges of one name that resolve to the same version run npm twice into separate tmp dirs; both
+        // Promote, one wins the rename and the loser reuses the winner. The result is correct and only the
+        // duplicate install is wasted, so in-flight work is deliberately keyed by spec and not coalesced by
+        // resolved version (that is only known after npm has run).
         const existing = this.inFlight.get(key);
         if (existing !== undefined)
         {
@@ -76,20 +80,26 @@ export class AdapterPackInstaller
         return promise;
     }
 
+    /** Roots of every currently-memoized resolved pack (absolute paths), for in-use accounting by cache GC. */
+    public ResolvedRoots(): readonly string[]
+    {
+        return [...this.resolved.values()].map(p => p.Root);
+    }
+
     /** Drops the memo (resolved and in-flight) for every range of `name`, so the next Install re-runs npm. The on-disk cache is untouched. */
     public Invalidate(name: string): void
     {
         const prefix = `${name}${AdapterPackInstaller.SpecSeparator}`;
         for (const key of [...this.resolved.keys()])
         {
-            if (key === name || key.startsWith(prefix))
+            if (key.startsWith(prefix))
             {
                 this.resolved.delete(key);
             }
         }
         for (const key of [...this.inFlight.keys()])
         {
-            if (key === name || key.startsWith(prefix))
+            if (key.startsWith(prefix))
             {
                 this.inFlight.delete(key);
             }

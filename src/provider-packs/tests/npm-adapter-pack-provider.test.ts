@@ -280,7 +280,7 @@ test("Dispose disposes every launched sandbox and later resolves reject", async 
         assert.equal(sandboxes.Sandboxes.length, 2);
         await provider.Dispose();
         assert.ok(sandboxes.Sandboxes.every(s => s.Disposed));
-        await assert.rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" }), AdapterPackError);
+        await Env.Rejects(provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" }), AdapterPackErrorKind.ProviderDisposed);
     });
 });
 

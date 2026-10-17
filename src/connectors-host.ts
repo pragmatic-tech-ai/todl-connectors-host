@@ -22,6 +22,8 @@ export interface ConnectorsHostOptions
 /** Composition root: registers all adapter factories and owns the catalog's lifecycle. */
 export class ConnectorsHost
 {
+    private static readonly ProviderDisposeFailed = "ConnectorsHost: provider dispose failed";
+
     public readonly Catalog: DataSourceAdapterCatalog;
 
     private readonly connectionResolver?: IConnectionResolver;
@@ -64,16 +66,32 @@ export class ConnectorsHost
 
     public async Dispose(): Promise<void>
     {
-        await this.Catalog.Dispose();
+        // Both teardowns always run: a catalog failure must not skip the provider (sandbox/child leak).
+        let catalogError: unknown;
+        let catalogFailed = false;
+        try
+        {
+            await this.Catalog.Dispose();
+        }
+        catch (err)
+        {
+            catalogFailed = true;
+            catalogError = err;
+        }
         // The engine's provider type has no Dispose; concrete providers (NpmAdapterPackProvider) do.
         const disposable = this.provider as { Dispose?: () => Promise<void> } | undefined;
         try
         {
             await disposable?.Dispose?.();
         }
-        catch
+        catch (err)
         {
-            // Provider teardown failure must not break host shutdown.
+            // Provider teardown failure must not break host shutdown, but it is surfaced, not dropped.
+            console.warn(ConnectorsHost.ProviderDisposeFailed, err);
+        }
+        if (catalogFailed)
+        {
+            throw catalogError;
         }
     }
 }

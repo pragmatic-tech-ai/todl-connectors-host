@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { ServiceProvider } from "@pragmatic-tech-ai/todl-runtime";
 import { DataSourceAdapterCatalog, DataSourceKind, ConnectionResolverKey, ResolutionAuditSinkKey } from "@pragmatic-tech-ai/todl";
@@ -132,7 +132,45 @@ test("host Dispose tolerates a provider without Dispose", async () =>
 test("host Dispose swallows a provider Dispose rejection", async () =>
 {
     const failing = { Resolve: async () => { throw new Error("unused"); }, Dispose: async () => { throw new Error("boom"); } };
-    await new ConnectorsHost({ provider: failing as IDataSourceAdapterProvider }).Dispose();
+    const warn = mock.method(console, "warn", () => { });
+    try
+    {
+        await new ConnectorsHost({ provider: failing as IDataSourceAdapterProvider }).Dispose();
+        assert.equal(warn.mock.callCount(), 1, "the swallowed provider error must be surfaced, not silently dropped");
+    }
+    finally
+    {
+        warn.mock.restore();
+    }
+});
+
+test("host Dispose disposes the catalog before the provider", async () =>
+{
+    const order: string[] = [];
+    const provider = new FakeProvider({} as unknown as IDataSourceAdapter);
+    provider.Dispose = async (): Promise<void> => { order.push("provider"); };
+    const host = new ConnectorsHost({ provider });
+    host.Catalog.Dispose = async (): Promise<void> => { order.push("catalog"); };
+    await host.Dispose();
+    assert.deepEqual(order, ["catalog", "provider"]);
+});
+
+test("a second host Dispose is harmless", async () =>
+{
+    const provider = new FakeProvider({} as unknown as IDataSourceAdapter);
+    const host = new ConnectorsHost({ provider });
+    await host.Dispose();
+    await host.Dispose();
+    assert.equal(provider.Disposed, 2, "provider Dispose is invoked each time; its own guard makes repeats idempotent");
+});
+
+test("a throwing catalog Dispose still disposes the provider and then surfaces the catalog error", async () =>
+{
+    const provider = new FakeProvider({} as unknown as IDataSourceAdapter);
+    const host = new ConnectorsHost({ provider });
+    host.Catalog.Dispose = async (): Promise<void> => { throw new Error("catalog boom"); };
+    await assert.rejects(host.Dispose(), /catalog boom/);
+    assert.equal(provider.Disposed, 1);
 });
 
 test("InvalidateProvider forwards the pack name to the provider's Invalidate", async () =>

@@ -19,8 +19,13 @@ class ChildHostPort implements IPackHostPort
 
 class ChildEntry
 {
+    private static readonly DisconnectEvent = "disconnect";
+
     public static Boot(): void
     {
+        // If the host dies without terminating us, the IPC channel disconnects: exit rather than linger
+        // as an orphan holding connections and the inherited environment.
+        process.on(ChildEntry.DisconnectEvent, () => process.exit(0));
         const port = typeof process.send === "function" ? new ChildHostPort() : null;
         void AdapterPackHost.Boot(port, { entry: process.env[PackEntryEnvVar] });
     }

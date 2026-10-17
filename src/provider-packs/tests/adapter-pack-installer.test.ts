@@ -271,10 +271,17 @@ test("a pre-existing cache root is returned and leaves no temp dir behind", asyn
         mkdirSync(pkgDir, { recursive: true });
         const pkg = { name: Env.PackName, version: "1.2.3", [AdapterPackContract.TodlBlockKey]: { [AdapterPackContract.ManifestKey]: Env.GoodBlock() } };
         writeFileSync(join(pkgDir, "package.json"), JSON.stringify(pkg));
-        const installer = new AdapterPackInstaller(cacheDir, new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock()));
+        const sentinel = join(cacheDir, Env.PackName, "1.2.3", "sentinel.txt");
+        writeFileSync(sentinel, "pre-existing");
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const installer = new AdapterPackInstaller(cacheDir, npm);
         const pack = await installer.Install(Env.PackName, "^1.0.0");
         assert.equal(pack.Root, join(cacheDir, Env.PackName, "1.2.3"));
         assert.deepEqual(Env.TempDirs(cacheDir), []);
+        // npm still runs once into a temp dir (the lockfile is the only source of the resolved version), but the
+        // pre-existing root must win the promote: its sentinel survives and the fresh tree never replaces it.
+        assert.equal(npm.Installs, 1);
+        assert.equal(readFileSync(sentinel, "utf8"), "pre-existing");
     });
 });
 
@@ -347,5 +354,21 @@ test("requireSignatures on with an invalid audit rejects SignatureInvalid and pr
         assert.equal(npm.Audits, 1);
         assert.deepEqual(Env.TempDirs(cacheDir), []);
         assert.equal(existsSync(join(cacheDir, Env.PackName, "1.2.3")), false);
+    });
+});
+
+test("Invalidate mid-flight clears the in-flight key so the install does not populate the memo", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock(), 30);
+        const installer = new AdapterPackInstaller(cacheDir, npm);
+        const inFlight = installer.Install(Env.PackName, "^1.0.0");
+        installer.Invalidate(Env.PackName);
+        await inFlight;
+        assert.deepEqual(installer.ResolvedRoots(), []);
+        await installer.Install(Env.PackName, "^1.0.0");
+        assert.equal(npm.Installs, 2);
+        assert.equal(installer.ResolvedRoots().length, 1);
     });
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -137,6 +138,26 @@ class ChildSandboxFixture
         {
             await new Promise<void>(settle => setTimeout(settle, ChildSandboxFixture.PollMs));
         }
+    }
+
+    /** Test-only: severs the host side of the live child's IPC channel without signalling the process. */
+    public static DisconnectChild(sandbox: ChildProcessSandbox): void
+    {
+        (sandbox as unknown as { child: ChildProcess }).child.disconnect();
+    }
+
+    /** Forks the child entry directly (as a host would) and resolves once it reports ready. */
+    public static async ForkReadyChild(): Promise<ChildProcess>
+    {
+        const plan = ChildProcessSandboxFactory.BuildForkPlan(ChildSandboxFixture.Installed(), {});
+        const child = fork(plan.entryPath, [], plan.forkOptions);
+        await new Promise<void>((resolveReady, rejectReady) =>
+        {
+            child.once("message", () => resolveReady());
+            child.once("error", rejectReady);
+            child.once("exit", () => rejectReady(new Error("child exited before ready")));
+        });
+        return child;
     }
 
     private static TempEntry(contents: string): string
@@ -426,5 +447,45 @@ test("child: BuildForkPlan composes advanced serialization, V8 limit flags, the 
     {
         assert.equal(forkOptions.uid, ChildSandboxFixture.Uid);
         assert.equal(forkOptions.gid, ChildSandboxFixture.Gid);
+    }
+});
+
+test("child: a child whose host side of the IPC channel disconnects exits instead of lingering as an orphan", { timeout: 60000 }, async () =>
+{
+    const child = await ChildSandboxFixture.ForkReadyChild();
+    try
+    {
+        const exited = new Promise<void>(settle => child.once("exit", () => settle()));
+        child.disconnect();
+        await Promise.race(
+        [
+            exited,
+            new Promise<void>((_, fail) => setTimeout(() => fail(new Error("orphaned child did not exit")), ChildSandboxFixture.ExitWaitMs).unref())
+        ]);
+    }
+    finally
+    {
+        child.kill(ChildSandboxFixture.SigKill);
+    }
+});
+
+test("child: an IPC disconnect fails the in-flight call fast instead of waiting out callTimeoutMs", { timeout: 60000 }, async () =>
+{
+    const sandbox = await ChildSandboxFixture.Launch({ callTimeoutMs: ChildSandboxFixture.IdleCallTimeoutMs });
+    try
+    {
+        const adapter = await sandbox.Factory(DataSourceKind.Sql).Open({ Kind: DataSourceKind.Sql, Config: {} });
+        const inFlight = adapter.Query({ Source: ChildSandboxFixture.HangSource, Fields: [] });
+        await adapter.Query({ Source: ChildSandboxFixture.WidgetsSource, Fields: [ChildSandboxFixture.IdField] });
+
+        const startedAt = Date.now();
+        const outcome = assert.rejects(inFlight, ChildSandboxFixture.HasKind(AdapterPackErrorKind.SandboxCrashed));
+        ChildSandboxFixture.DisconnectChild(sandbox);
+        await outcome;
+        assert.ok(Date.now() - startedAt < ChildSandboxFixture.ImmediateMs, "disconnect must reject in-flight calls well before callTimeoutMs");
+    }
+    finally
+    {
+        await sandbox.Dispose();
     }
 });
