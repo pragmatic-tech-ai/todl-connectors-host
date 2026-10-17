@@ -8,10 +8,12 @@ export interface CacheEvictionPolicy
     readonly MaxAgeMs?: number;
 }
 
-/** The shared on-disk adapter-pack cache laid out as `<cacheDir>/<name>/<version>/`. */
+/** The shared on-disk adapter-pack cache laid out as `<cacheDir>/<name>/<version>/` (or `<version>~scripts/` when install scripts were allowed). */
 export class PackCache
 {
     private static readonly AccessMarker = ".todl-accessed";
+    // "~" is not a valid semver character, so "<version>~scripts" can never collide with a real version dir.
+    private static readonly ScriptsSuffix = "~scripts";
     private static readonly ScopePrefix = "@";
     private static readonly HiddenPrefix = ".";
     private static readonly Utf8 = "utf8";
@@ -22,9 +24,10 @@ export class PackCache
     {
     }
 
-    public PathFor(name: string, version: string): string
+    /** The cache root for a pack version; the script policy is part of the path so an allowlist toggle resolves to a different root. */
+    public PathFor(name: string, version: string, scriptsAllowed: boolean): string
     {
-        return join(this.cacheDir, name, version);
+        return join(this.cacheDir, name, scriptsAllowed ? `${version}${PackCache.ScriptsSuffix}` : version);
     }
 
     public async Has(root: string): Promise<boolean>
@@ -125,7 +128,7 @@ export class PackCache
             const entries: { root: string; accessed: number }[] = [];
             for (const version of await this.ListDirs(join(this.cacheDir, name)))
             {
-                const root = this.PathFor(name, version);
+                const root = join(this.cacheDir, name, version);
                 entries.push({ root, accessed: await this.ReadAccessed(root) });
             }
             entries.sort((a, b) => b.accessed - a.accessed);

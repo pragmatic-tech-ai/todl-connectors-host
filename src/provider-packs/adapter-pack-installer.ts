@@ -140,6 +140,8 @@ export class AdapterPackInstaller
                 // Signature-first: an allowlisted pack is about to run arbitrary code on the host, so its registry
                 // signature is verified NOW (mandatory, fail-closed) and the lifecycle scripts run only if it passes.
                 await this.npm.AuditSignatures(tmp);
+                // Note: this rebuild is unfiltered, so allowlisting a pack trusts its full transitive dependency
+                // closure to run install scripts; ^/dist-tag ranges can let that closure change across resolves.
                 await this.npm.RunInstallScripts(tmp);
             }
             else if (this.requireSignatures)
@@ -151,7 +153,7 @@ export class AdapterPackInstaller
             const tmpRead = await AdapterPackManifestReader.Read(tmpPackDir);
             AdapterPackInstaller.EnsureEntryInside(tmpPackDir, tmpRead.manifest.entry, name);
 
-            const root = this.cache.PathFor(name, version);
+            const root = this.cache.PathFor(name, version, allowScripts);
             promoted = await this.cache.Promote(tmp, root);
             const packDir = join(root, AdapterPackInstaller.NodeModules, name);
             const { manifest } = await AdapterPackManifestReader.Read(packDir);

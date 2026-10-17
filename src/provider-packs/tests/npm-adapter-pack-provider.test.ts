@@ -564,7 +564,17 @@ test("AllowScripts with an invalid name rejects and does not invalidate the pack
     await Env.With(async (provider, _npm, sandboxes) =>
     {
         await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
-        await assert.rejects(provider.AllowScripts("../evil"));
+        await Env.Rejects(provider.AllowScripts("../evil"), AdapterPackErrorKind.InvalidName);
+        assert.ok(!sandboxes.Sandboxes[0].Disposed);
+    });
+});
+
+test("DenyScripts with an invalid name rejects and does not invalidate the pack", async () =>
+{
+    await Env.With(async (provider, _npm, sandboxes) =>
+    {
+        await provider.Resolve({ Kind: DataSourceKind.Sql, Provider: "acme-pack@^1" });
+        await Env.Rejects(provider.DenyScripts("../evil"), AdapterPackErrorKind.InvalidName);
         assert.ok(!sandboxes.Sandboxes[0].Disposed);
     });
 });

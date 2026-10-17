@@ -31,7 +31,8 @@ test("PathFor composes cacheDir/name/version", async () =>
 {
     await Env.With(async cacheDir =>
     {
-        assert.equal(new PackCache(cacheDir).PathFor("@s/p", "1.0.0"), join(cacheDir, "@s/p", "1.0.0"));
+        assert.equal(new PackCache(cacheDir).PathFor("@s/p", "1.0.0", false), join(cacheDir, "@s/p", "1.0.0"));
+        assert.equal(new PackCache(cacheDir).PathFor("@s/p", "1.0.0", true), join(cacheDir, "@s/p", "1.0.0~scripts"));
     });
 });
 

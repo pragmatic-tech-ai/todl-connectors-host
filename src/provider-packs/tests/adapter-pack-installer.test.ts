@@ -44,9 +44,11 @@ class FakeNpm implements INpmCli
         writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
     }
 
-    public async RunInstallScripts(_cwd: string): Promise<void>
+    public async RunInstallScripts(cwd: string): Promise<void>
     {
         this.Sequence.push("scripts");
+        // Simulates a postinstall artifact written into the installed pack dir.
+        writeFileSync(join(cwd, "node_modules", this.name, ".scripts-ran"), "1");
     }
 
     public async AuditSignatures(_cwd: string): Promise<void>
@@ -450,5 +452,28 @@ test("Invalidate mid-flight clears the in-flight key so the install does not pop
         await installer.Install(Env.PackName, "^1.0.0");
         assert.equal(npm.Installs, 2);
         assert.equal(installer.ResolvedRoots().length, 1);
+    });
+});
+
+test("toggling the allowlist changes the served pack tree (scripts artifact appears under a distinct ~scripts root)", async () =>
+{
+    await Env.With(async cacheDir =>
+    {
+        const npm = new FakeNpm(Env.PackName, "1.2.3", Env.GoodBlock());
+        const scripts = new ScriptAllowlist(join(cacheDir, "allow.json"), []);
+        const installer = new AdapterPackInstaller(cacheDir, npm, false, scripts);
+        const marker = join("node_modules", Env.PackName, ".scripts-ran");
+
+        const plain = await installer.Install(Env.PackName, "^1.0.0");
+        assert.equal(plain.Root.endsWith("~scripts"), false);
+        assert.equal(existsSync(join(plain.Root, marker)), false);
+
+        await installer.AllowScripts(Env.PackName);
+        installer.Invalidate(Env.PackName);
+        const allowed = await installer.Install(Env.PackName, "^1.0.0");
+        assert.equal(allowed.Root.endsWith("~scripts"), true);
+        assert.notEqual(allowed.Root, plain.Root);
+        assert.equal(existsSync(join(allowed.Root, marker)), true);
+        assert.equal(existsSync(join(plain.Root, marker)), false);
     });
 });

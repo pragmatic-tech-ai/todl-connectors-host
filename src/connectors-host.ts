@@ -71,12 +71,14 @@ export class ConnectorsHost
         await target?.AllowScripts?.(name);
     }
 
+    /** Revokes install scripts for a pack. No-op when there is no provider or it lacks DenyScripts. */
     public async DenyPackScripts(name: string): Promise<void>
     {
         const target = this.provider as { DenyScripts?: (n: string) => Promise<void> } | undefined;
         await target?.DenyScripts?.(name);
     }
 
+    /** Lists the pack names allowed to run install scripts. Empty when there is no provider or it lacks ListScriptAllowlist. */
     public async ListPackScriptAllowlist(): Promise<readonly string[]>
     {
         const target = this.provider as { ListScriptAllowlist?: () => Promise<readonly string[]> } | undefined;

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { AdapterPackError, AdapterPackErrorKind } from "../adapter-pack-error.js";
 import { NpmCli } from "../npm-cli.js";
 
-/** Fake child process: drive it with Emit("close", code) / Emit("error", err). */
+/** Fake child process: drive it with emit("close", code) / emit("error", err). */
 class FakeChild extends EventEmitter
 {
     public readonly stdout = new EventEmitter();
@@ -69,8 +69,7 @@ test("RunInstallScripts passes rebuild to spawn and never --ignore-scripts", asy
 {
     const capture = new SpawnCapture("close", 0);
     await new NpmCli({ spawn: capture.Spawn }).RunInstallScripts("/x");
-    const rebuildAt = capture.Args.indexOf("rebuild");
-    assert.ok(rebuildAt >= 0);
+    assert.strictEqual(capture.Args[capture.Args.length - 1], "rebuild");
     assert.ok(!capture.Args.includes("--ignore-scripts"));
 });
 

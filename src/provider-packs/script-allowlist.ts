@@ -120,7 +120,7 @@ export class ScriptAllowlist
         }
         catch (err)
         {
-            await rm(tmp, { force: true });
+            await rm(tmp, { force: true }).catch(() => undefined);
             throw err;
         }
     }
