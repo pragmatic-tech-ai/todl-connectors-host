@@ -1,10 +1,39 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { AdapterPackError, AdapterPackErrorKind } from "../adapter-pack-error.js";
 import { NpmCli } from "../npm-cli.js";
+
+/** Fake child process: drive it with Emit("close", code) / Emit("error", err). */
+class FakeChild extends EventEmitter
+{
+    public readonly stdout = new EventEmitter();
+    public readonly stderr = new EventEmitter();
+
+    public kill(): boolean
+    {
+        return true;
+    }
+}
+
+/** Captures what reaches spawn and replies via a scripted event on the next tick. */
+class SpawnCapture
+{
+    public Args: readonly string[] = [];
+
+    public constructor(private readonly event: string, private readonly payload: unknown)
+    {
+    }
+
+    public Spawn = (_command: string, args: readonly string[], _options: SpawnOptions): ChildProcess =>
+    {
+        this.Args = args;
+        const child = new FakeChild();
+        setImmediate(() => child.emit(this.event, this.payload));
+        return child as unknown as ChildProcess;
+    };
+}
 
 test("audit output reporting an invalid or missing signature classifies as SignatureInvalid", () =>
 {
@@ -28,38 +57,35 @@ test("unrecognized audit failures stay fail-closed as SignatureInvalid", () =>
     assert.equal(NpmCli.ClassifyAuditFailure("something odd"), AdapterPackErrorKind.SignatureInvalid);
 });
 
-test("Install args pass --ignore-scripts and still install", () =>
+test("Install passes --ignore-scripts and install to spawn", async () =>
 {
-    assert.equal(NpmCli.InstallArgs[0], "install");
-    assert.ok(NpmCli.InstallArgs.includes("--ignore-scripts"));
+    const capture = new SpawnCapture("close", 0);
+    await new NpmCli({ spawn: capture.Spawn }).Install("/x");
+    assert.ok(capture.Args.includes("install"));
+    assert.ok(capture.Args.includes("--ignore-scripts"));
 });
 
-test("RunInstallScripts args begin with rebuild and never pass --ignore-scripts", () =>
+test("RunInstallScripts passes rebuild to spawn and never --ignore-scripts", async () =>
 {
-    assert.equal(NpmCli.RebuildArgs[0], "rebuild");
-    assert.ok(!NpmCli.RebuildArgs.includes("--ignore-scripts"));
+    const capture = new SpawnCapture("close", 0);
+    await new NpmCli({ spawn: capture.Spawn }).RunInstallScripts("/x");
+    const rebuildAt = capture.Args.indexOf("rebuild");
+    assert.ok(rebuildAt >= 0);
+    assert.ok(!capture.Args.includes("--ignore-scripts"));
 });
 
-test("RunInstallScripts maps a spawn failure to InstallFailed", async () =>
+test("RunInstallScripts maps a non-zero exit to InstallFailed", async () =>
 {
-    const missing = join(tmpdir(), "npm-cli-test-missing-dir-does-not-exist");
+    const capture = new SpawnCapture("close", 1);
     await assert.rejects(
-        new NpmCli().RunInstallScripts(missing),
+        new NpmCli({ spawn: capture.Spawn }).RunInstallScripts("/x"),
         (err: unknown) => err instanceof AdapterPackError && err.Kind === AdapterPackErrorKind.InstallFailed);
 });
 
-test("RunInstallScripts maps a non-zero npm exit to InstallFailed", async () =>
+test("RunInstallScripts maps a spawn error to InstallFailed", async () =>
 {
-    const dir = await mkdtemp(join(tmpdir(), "npm-cli-test-"));
-    try
-    {
-        await writeFile(join(dir, "package.json"), JSON.stringify({ name: "npm-cli-failing-fixture", version: "1.0.0", scripts: { install: "node -e process.exit(1)" } }));
-        await assert.rejects(
-            new NpmCli().RunInstallScripts(dir),
-            (err: unknown) => err instanceof AdapterPackError && err.Kind === AdapterPackErrorKind.InstallFailed);
-    }
-    finally
-    {
-        await rm(dir, { recursive: true, force: true });
-    }
+    const capture = new SpawnCapture("error", new Error("ENOENT"));
+    await assert.rejects(
+        new NpmCli({ spawn: capture.Spawn }).RunInstallScripts("/x"),
+        (err: unknown) => err instanceof AdapterPackError && err.Kind === AdapterPackErrorKind.InstallFailed);
 });

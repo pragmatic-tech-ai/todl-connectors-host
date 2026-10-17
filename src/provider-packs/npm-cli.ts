@@ -1,7 +1,10 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AdapterPackError, AdapterPackErrorKind } from "./adapter-pack-error.js";
+
+/** The slice of node:child_process spawn that NpmCli uses; injectable so tests can capture what reaches spawn. */
+export type NpmSpawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
 /** Runs npm against the package.json already written in a directory. */
 export interface INpmCli
@@ -28,8 +31,8 @@ export class NpmCli implements INpmCli
     private static readonly DefaultTimeoutMs = 120000;
     private static readonly Stdio: ["ignore", "pipe", "pipe"] = ["ignore", "pipe", "pipe"];
     private static readonly KillSignal = "SIGKILL";
-    public static readonly InstallArgs: readonly string[] = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
-    public static readonly RebuildArgs: readonly string[] = ["rebuild"];
+    private static readonly InstallArgs: readonly string[] = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
+    private static readonly RebuildArgs: readonly string[] = ["rebuild"];
     private static readonly AuditArgs: readonly string[] = ["audit", "signatures"];
     private static readonly InstallLabel = "npm install";
     private static readonly RebuildLabel = "npm rebuild";
@@ -71,9 +74,11 @@ export class NpmCli implements INpmCli
     }
 
     private readonly timeoutMs: number;
+    private readonly spawn: NpmSpawn;
 
-    public constructor(options: { timeoutMs?: number } = {})
+    public constructor(options: { timeoutMs?: number; spawn?: NpmSpawn } = {})
     {
+        this.spawn = options.spawn ?? spawn;
         this.timeoutMs = options.timeoutMs ?? NpmCli.DefaultTimeoutMs;
     }
 
@@ -127,7 +132,7 @@ export class NpmCli implements INpmCli
             // Install runs with --ignore-scripts (see InstallArgs); lifecycle scripts run only via RunInstallScripts,
             // and only for packs the operator put on the script allowlist, after their signature verifies. env is the
             // host env: trusted (allowlisted) packs' scripts run with it by the operator's explicit choice.
-            const child = spawn(launch.Command, [...launch.Prefix, ...args], { cwd, env: process.env, stdio: NpmCli.Stdio });
+            const child = this.spawn(launch.Command, [...launch.Prefix, ...args], { cwd, env: process.env, stdio: NpmCli.Stdio });
             const timer = setTimeout(() =>
             {
                 child.kill(NpmCli.KillSignal);
