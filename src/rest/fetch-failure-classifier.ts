@@ -1,13 +1,13 @@
 import { ConnectionFailureKind } from "@pragmatic-tech-ai/todl";
 
-/** Classifies a thrown fetch/HTTP transport error. Reads only the error's type, name, status and the
- *  trailing integer of its message; never stringifies the error beyond that or touches a secret. */
+/** Classifies a thrown fetch/HTTP transport error. Reads only the error type, name, numeric status and the
+ *  status in our own "http request failed with status NNN" message; never stringifies the error or touches a secret. */
 export class FetchFailureClassifier
 {
     private static readonly TransientStatuses: ReadonlySet<number> = new Set([502, 503, 504, 429]);
     private static readonly AuthStatuses: ReadonlySet<number> = new Set([401, 403]);
     private static readonly NetworkErrorNames: ReadonlySet<string> = new Set(["AbortError", "TimeoutError"]);
-    private static readonly TrailingStatus = /(\d+)\s*$/;
+    private static readonly OwnMessageStatus = /^http request failed with status (\d{3})\s*$/;
 
     public static Classify(error: unknown): ConnectionFailureKind
     {
@@ -40,7 +40,7 @@ export class FetchFailureClassifier
         }
         if (typeof e.message === "string")
         {
-            const match = FetchFailureClassifier.TrailingStatus.exec(e.message);
+            const match = FetchFailureClassifier.OwnMessageStatus.exec(e.message);
             return match === null ? undefined : Number(match[1]);
         }
         return undefined;

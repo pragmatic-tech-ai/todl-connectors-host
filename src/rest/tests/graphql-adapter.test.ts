@@ -1,8 +1,9 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { ConnectionFailureKind, QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { WriteBatch } from "@pragmatic-tech-ai/todl";
 import { GraphQlAdapter, GraphQlConnectionConfig, GraphQlName } from "../graphql-adapter.js";
+import { FetchFailureClassifier } from "../fetch-failure-classifier.js";
 import { RestHttpMethod } from "../rest-http-client.js";
 import type { RestResponse } from "../rest-http-client.js";
 import { FakeGraphQlHttpClient } from "../../testing/fake-graphql-http-client.js";
@@ -349,4 +350,23 @@ test("GraphQlAdapter.ClassifyFailure delegates to the fetch classifier", () =>
     assert.equal(adapter.ClassifyFailure(new TypeError("fetch failed")), ConnectionFailureKind.Transient);
     assert.equal(adapter.ClassifyFailure({ status: 401 }), ConnectionFailureKind.Auth);
     assert.equal(adapter.ClassifyFailure({ status: 404 }), ConnectionFailureKind.Permanent);
+});
+
+test("a 200 carrying GraphQL errors is a normal write failure and is never routed through the classifier", async () =>
+{
+    const classify = mock.method(FetchFailureClassifier, "Classify");
+    try
+    {
+        const connection = GraphQlConnectionConfig.From(GraphQlAdapterFixture.ConfigFull());
+        const adapter = new GraphQlAdapter(new ErrorClient(connection), connection);
+        const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+            [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+        assert.equal(result.Applied, 0);
+        assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Error);
+        assert.equal(classify.mock.callCount(), 0);
+    }
+    finally
+    {
+        classify.mock.restore();
+    }
 });
