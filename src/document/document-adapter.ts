@@ -1,5 +1,5 @@
 import { ConnectionFailureKind, RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalRecord, IDataSourceAdapter, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, IDataSourceAdapter, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { MongoFilter } from "./mongo-filter.js";
 import { DocumentIdentifier } from "./document-identifier.js";
@@ -8,6 +8,7 @@ import type { IDocumentSession } from "./document-session.js";
 /** Document adapter: Find to read (Where re-applied in-adapter), Upsert/Delete to write. */
 export class DocumentAdapter implements IDataSourceAdapter
 {
+    private static readonly GreaterThanOperator = "$gt";
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly AtomicUnsupportedReason = "atomic write not supported by this connector";
 
@@ -21,6 +22,12 @@ export class DocumentAdapter implements IDataSourceAdapter
 
     /** Whether this adapter can enforce an optimistic version guard: always, via {@link IDocumentSession.ReadVersionState}. */
     public get CanVersion(): boolean
+    {
+        return true;
+    }
+
+    /** Whether this adapter supports keyset paging: always, via a sorted, limited, `$gt`-seeked Find. */
+    public get CanPage(): boolean
     {
         return true;
     }
@@ -60,6 +67,31 @@ export class DocumentAdapter implements IDataSourceAdapter
         const filter = MongoFilter.From(request.Where?.All ?? []);
         const docs = await this.session.Find(request.Source, filter);
         return ExternalQuery.Apply(docs, request);
+    }
+
+    /**
+     * Keyset page: Find sorted ascending on the order key, strictly after page.After, limited to page.Limit.
+     * NextAfter is the last fetched document's order-key value, only when a full page came back.
+     */
+    public async QueryPage(request: QueryRequest, page: PageQuery): Promise<PageSlice>
+    {
+        DocumentIdentifier.Validate(request.Source);
+        const orderKey = DocumentIdentifier.Validate(request.OrderKey ?? request.Fields[0]!);
+        const base = MongoFilter.From(request.Where?.All ?? []);
+        // The keyset term is merged here too so any session (even one ignoring options) receives the seek; the merge is idempotent.
+        const filter = page.After === undefined ? base : { ...base, [orderKey]: { [DocumentAdapter.GreaterThanOperator]: page.After } };
+        const docs = await this.session.Find(request.Source, filter, {
+            Sort: { [orderKey]: 1 },
+            After: page.After === undefined ? undefined : { Field: orderKey, Value: page.After },
+            Limit: page.Limit,
+        });
+        const records = ExternalQuery.Apply(docs, request);
+        const lastKey = docs.length === page.Limit && page.Limit > 0 ? docs[docs.length - 1]![orderKey] : undefined;
+        if (lastKey == null)
+        {
+            return { Records: records };
+        }
+        return { Records: records, NextAfter: lastKey as ExternalFieldValue };
     }
 
     /** Dispatches on the batch's atomicity axis: resilient Sequential apply, or all-or-nothing Transactional. */

@@ -10,10 +10,19 @@ export type VersionState =
     | { Exists: false }
     | { Exists: true; Version: ExternalFieldValue | null };
 
+/** Optional keyset-paging controls for {@link IDocumentSession.Find}; absent means an unpaged find. */
+export interface DocumentFindOptions
+{
+    Sort?: Record<string, 1 | -1>;
+    /** Strict seek: only documents whose Field is greater than Value. */
+    After?: { Field: string; Value: ExternalFieldValue };
+    Limit?: number;
+}
+
 /** Injected document-store seam (Mongo-shaped). The adapter owns semantics; the host owns the driver. */
 export interface IDocumentSession
 {
-    Find(collection: string, filter: Record<string, unknown>): Promise<readonly Record<string, unknown>[]>;
+    Find(collection: string, filter: Record<string, unknown>, options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>;
     Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>;
     Delete(collection: string, idField: string, key: unknown): Promise<boolean>;
     /** Probes a document's existence and stored version in one read (absent vs present-unversioned vs versioned). */

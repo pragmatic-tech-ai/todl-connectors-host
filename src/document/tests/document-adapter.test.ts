@@ -183,3 +183,76 @@ test("Transactional returns Unsupported when the session can't transact", async 
     assert.deepEqual(result.Failures.map(f => f.Kind), [WriteFailureKind.Unsupported, WriteFailureKind.Unsupported]);
     assert.deepEqual(result.Failures.map(f => f.Key), ["c1", "c2"]);
 });
+
+type RecordedFind = { Collection: string; Filter: Record<string, unknown>; Options?: unknown };
+
+class PagingFixture
+{
+    public static readonly Key = "id";
+    public static readonly After = "k5";
+    public static readonly GtOperator = "$gt";
+
+    public static Recorder(docs: Record<string, unknown>[]): { Calls: RecordedFind[]; Session: FakeDocumentSession }
+    {
+        const calls: RecordedFind[] = [];
+        const session = new FakeDocumentSession();
+        session.Find = async (collection, filter, options) =>
+        {
+            calls.push({ Collection: collection, Filter: filter, Options: options });
+            return docs;
+        };
+        return { Calls: calls, Session: session };
+    }
+
+    public static Request(): { Source: string; Fields: string[]; OrderKey: string; Where: { All: { Field: string; Op: QueryCompareOp; Value: string }[] } }
+    {
+        return { Source: DocumentFixture.Collection, Fields: [PagingFixture.Key, DocumentFixture.Label], OrderKey: PagingFixture.Key,
+            Where: { All: [{ Field: DocumentFixture.Tier, Op: QueryCompareOp.Eq, Value: DocumentFixture.Gold }] } };
+    }
+}
+
+test("DocumentAdapter.CanPage is true", () =>
+{
+    assert.equal(new DocumentAdapter(new FakeDocumentSession()).CanPage, true);
+});
+
+test("QueryPage merges the base filter with a strict $gt keyset term, sorts ascending and limits", async () =>
+{
+    const rec = PagingFixture.Recorder([{ id: "k6", label: "a", tier: "gold" }, { id: "k7", label: "b" }]);
+    const slice = await new DocumentAdapter(rec.Session).QueryPage(PagingFixture.Request(), { After: PagingFixture.After, Limit: 2 });
+    assert.equal(rec.Calls.length, 1);
+    assert.deepEqual(rec.Calls[0]!.Filter, { [DocumentFixture.Tier]: DocumentFixture.Gold, id: { [PagingFixture.GtOperator]: PagingFixture.After } });
+    assert.deepEqual(rec.Calls[0]!.Options, { Sort: { id: 1 }, After: { Field: "id", Value: PagingFixture.After }, Limit: 2 });
+    assert.equal(slice.NextAfter, "k7");
+});
+
+test("QueryPage first page carries no $gt term but still sorts and limits", async () =>
+{
+    const rec = PagingFixture.Recorder([{ id: "k1", label: "a" }]);
+    await new DocumentAdapter(rec.Session).QueryPage(PagingFixture.Request(), { Limit: 2 });
+    assert.deepEqual(rec.Calls[0]!.Filter, { [DocumentFixture.Tier]: DocumentFixture.Gold });
+    assert.deepEqual(rec.Calls[0]!.Options, { Sort: { id: 1 }, After: undefined, Limit: 2 });
+});
+
+test("QueryPage short slice has no NextAfter", async () =>
+{
+    const rec = PagingFixture.Recorder([{ id: "k6", label: "a", tier: "gold" }]);
+    const slice = await new DocumentAdapter(rec.Session).QueryPage(PagingFixture.Request(), { After: PagingFixture.After, Limit: 2 });
+    assert.equal(slice.Records.length, 1);
+    assert.equal(slice.NextAfter, undefined);
+});
+
+test("QueryPage full slice whose last order key is null/undefined has no NextAfter", async () =>
+{
+    const recNull = PagingFixture.Recorder([{ id: "k6" }, { id: null }]);
+    assert.equal((await new DocumentAdapter(recNull.Session).QueryPage(PagingFixture.Request(), { Limit: 2 })).NextAfter, undefined);
+    const recMissing = PagingFixture.Recorder([{ id: "k6" }, { label: "x" }]);
+    assert.equal((await new DocumentAdapter(recMissing.Session).QueryPage(PagingFixture.Request(), { Limit: 2 })).NextAfter, undefined);
+});
+
+test("QueryPage defaults the order key to the first field", async () =>
+{
+    const rec = PagingFixture.Recorder([]);
+    await new DocumentAdapter(rec.Session).QueryPage({ Source: DocumentFixture.Collection, Fields: [DocumentFixture.Label] }, { Limit: 3 });
+    assert.deepEqual((rec.Calls[0]!.Options as { Sort: unknown }).Sort, { label: 1 });
+});

@@ -1,5 +1,5 @@
 import type { ExternalFieldValue } from "@pragmatic-tech-ai/todl";
-import type { IDocumentSession, VersionState } from "../document/document-session.js";
+import type { DocumentFindOptions, IDocumentSession, VersionState } from "../document/document-session.js";
 
 /** In-memory document store. Find ignores the filter and returns every doc (the adapter re-filters). */
 export class FakeDocumentSession implements IDocumentSession
@@ -20,7 +20,7 @@ export class FakeDocumentSession implements IDocumentSession
         return this;
     }
 
-    public async Find(collection: string, _filter: Record<string, unknown>): Promise<readonly Record<string, unknown>[]>
+    public async Find(collection: string, _filter: Record<string, unknown>, _options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>
     {
         return [...(this.store.get(collection)?.values() ?? [])];
     }

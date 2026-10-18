@@ -1,7 +1,7 @@
 import { MongoClient } from "mongodb";
 import type { ClientSession, MongoClientOptions } from "mongodb";
 import type { ExternalFieldValue } from "@pragmatic-tech-ai/todl";
-import type { IDocumentSession, VersionState } from "./document-session.js";
+import type { DocumentFindOptions, IDocumentSession, VersionState } from "./document-session.js";
 import { DocumentIdentifier } from "./document-identifier.js";
 
 /** Parsed Mongo connection. */
@@ -48,6 +48,7 @@ export class DocumentConnectionConfig
 /** IDocumentSession over a mongodb MongoClient. */
 export class MongoDocumentSession implements IDocumentSession
 {
+    private static readonly GreaterThanOperator = "$gt";
     private static readonly AuthMissingUserMessage = "mongo auth requires a 'user' config key when a secret is supplied";
 
     public constructor(
@@ -84,11 +85,37 @@ export class MongoDocumentSession implements IDocumentSession
         return new MongoDocumentSession(client, connection.database, connection.versionField);
     }
 
-    public async Find(collection: string, filter: Record<string, unknown>): Promise<readonly Record<string, unknown>[]>
+    public async Find(collection: string, filter: Record<string, unknown>, options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>
     {
         DocumentIdentifier.Validate(collection);
-        return this.client.db(this.database).collection(collection)
-            .find(filter, { projection: { _id: 0 }, ...this.SessionOption() }).toArray() as unknown as Record<string, unknown>[];
+        const effective = this.EffectiveFilter(filter, options);
+        let cursor = this.client.db(this.database).collection(collection)
+            .find(effective, { projection: MongoDocumentSession.Projection(), ...this.SessionOption() });
+        if (options?.Sort !== undefined)
+        {
+            cursor = cursor.sort(options.Sort);
+        }
+        if (options?.Limit !== undefined)
+        {
+            cursor = cursor.limit(options.Limit);
+        }
+        return cursor.toArray() as unknown as Record<string, unknown>[];
+    }
+
+    /** The base filter merged with the strict keyset term when a seek position is supplied. */
+    private EffectiveFilter(filter: Record<string, unknown>, options?: DocumentFindOptions): Record<string, unknown>
+    {
+        if (options?.After === undefined)
+        {
+            return filter;
+        }
+        const field = DocumentIdentifier.Validate(options.After.Field);
+        return { ...filter, [field]: { [MongoDocumentSession.GreaterThanOperator]: options.After.Value } };
+    }
+
+    private static Projection(): { _id: 0 }
+    {
+        return { _id: 0 };
     }
 
     public async Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>
