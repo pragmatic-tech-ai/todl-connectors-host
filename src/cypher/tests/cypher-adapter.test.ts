@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import type { QueryRequest } from "@pragmatic-tech-ai/todl";
 import { CypherAdapter } from "../cypher-adapter.js";
 import { FakeCypherSession, TransactionalFakeCypherSession } from "../../testing/fake-cypher-session.js";
 import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
@@ -139,4 +140,78 @@ test("a version-guarded upsert of a new key proceeds", async () =>
     });
     assert.equal(result.Applied, 1);
     assert.equal(result.Failures.length, 0);
+});
+
+class CypherPagingFixture
+{
+    public static readonly Key = "id";
+    public static readonly After = "k5";
+    public static readonly Tier = "tier";
+    public static readonly Gold = "gold";
+    public static readonly Plain = "plain";
+
+    public static Request(): QueryRequest
+    {
+        return {
+            Source: CypherFixture.Customer, Fields: [CypherPagingFixture.Key, "label"], OrderKey: CypherPagingFixture.Key,
+            Where: { All: [
+                { Field: CypherPagingFixture.Tier, Op: QueryCompareOp.Eq, Value: CypherPagingFixture.Gold },
+                { Field: "label", Op: QueryCompareOp.Neq, Value: CypherPagingFixture.Plain },
+            ] },
+        };
+    }
+
+    public static Make(rows: Record<string, unknown>[]): { Session: FakeCypherSession; Adapter: CypherAdapter }
+    {
+        const session = new FakeCypherSession();
+        session.Seed(CypherFixture.Customer, rows);
+        return { Session: session, Adapter: new CypherAdapter(session) };
+    }
+}
+
+test("CanPage is advertised", () =>
+{
+    assert.equal(CypherFixture.Make().CanPage, true);
+});
+
+test("QueryPage emits a strict > keyset term ANDed with Where, ordered ascending and limited at the source", async () =>
+{
+    const t = CypherPagingFixture.Make([{ id: "k6", label: "a", tier: "gold" }, { id: "k7", label: "b", tier: "gold" }]);
+    const slice = await t.Adapter.QueryPage(CypherPagingFixture.Request(), { After: CypherPagingFixture.After, Limit: 2 });
+    assert.equal(t.Session.Statements.length, 1);
+    const st = t.Session.Statements[0]!;
+    assert.equal(st.cypher, "MATCH (n:`Customer`) WHERE n.`id` > $after AND n.`tier` = $w0 AND n.`label` <> $w1 "
+        + "RETURN properties(n) AS props ORDER BY n.`id` LIMIT toInteger($limit)");
+    assert.deepEqual(st.params, { after: "k5", limit: 2, w0: "gold", w1: "plain" });
+    assert.equal(slice.NextAfter, "k7");
+    assert.deepEqual(slice.Records, [{ id: "k6", label: "a" }, { id: "k7", label: "b" }]);
+});
+
+test("QueryPage first page has no keyset term but still orders and limits", async () =>
+{
+    const t = CypherPagingFixture.Make([]);
+    await t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["id"], OrderKey: "id" }, { Limit: 3 });
+    const st = t.Session.Statements[0]!;
+    assert.equal(st.cypher, "MATCH (n:`Customer`) RETURN properties(n) AS props ORDER BY n.`id` LIMIT toInteger($limit)");
+    assert.deepEqual(st.params, { limit: 3 });
+});
+
+test("QueryPage short slice has no NextAfter; full slice with a null last key has none either", async () =>
+{
+    const short = CypherPagingFixture.Make([{ id: "k6" }]);
+    assert.equal((await short.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["id"] }, { Limit: 2 })).NextAfter, undefined);
+    const nul = CypherPagingFixture.Make([{ id: "k6" }]);
+    nul.Session.Seed(CypherFixture.Customer, [{ id: "k6" }, { id: "k7", rank: null }]);
+    const slice = await nul.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["rank"], OrderKey: "rank" }, { Limit: 2 });
+    assert.equal(slice.NextAfter, undefined);
+});
+
+test("QueryPage defaults the order key to the first field and rejects bad limits / no key", async () =>
+{
+    const t = CypherPagingFixture.Make([]);
+    await t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["label"] }, { Limit: 1 });
+    assert.match(t.Session.Statements[0]!.cypher, /ORDER BY n\.`label` LIMIT/);
+    await assert.rejects(t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["id"] }, { Limit: 0 }), /positive integer/);
+    await assert.rejects(t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["id"] }, { Limit: 1.5 }), /positive integer/);
+    await assert.rejects(t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: [] }, { Limit: 1 }), /order/);
 });

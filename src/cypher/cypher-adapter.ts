@@ -1,5 +1,5 @@
-import { ConnectionFailureKind, RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalRecord, IDataSourceAdapter, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import { ConnectionFailureKind, QueryCompareOp, RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, IDataSourceAdapter, PageQuery, PageSlice, QueryComparison, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { CypherIdentifier } from "./cypher-identifier.js";
 import type { ICypherSession } from "./cypher-session.js";
@@ -35,6 +35,19 @@ export class CypherAdapter implements IDataSourceAdapter
     public static readonly Space = " ";
     public static readonly Dot = ".";
     public static readonly MergeAssign = "+=";
+    public static readonly Where = "WHERE";
+    public static readonly And = "AND";
+    public static readonly OrderBy = "ORDER BY";
+    public static readonly Limit = "LIMIT";
+    public static readonly AfterParam = "after";
+    public static readonly LimitParam = "limit";
+    public static readonly WhereParamPrefix = "w";
+    public static readonly GreaterOp = ">";
+    public static readonly EqualOp = "=";
+    public static readonly NotEqualOp = "<>";
+    public static readonly ToIntegerFn = "toInteger";
+    private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
+    private static readonly MissingOrderKeyMessage = "QueryPage requires request.OrderKey or at least one field to order by";
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly AtomicUnsupportedReason = "atomic write not supported by this connector";
 
@@ -48,6 +61,12 @@ export class CypherAdapter implements IDataSourceAdapter
 
     /** Whether this adapter can enforce an optimistic version guard: always, via a MATCH version probe. */
     public get CanVersion(): boolean
+    {
+        return true;
+    }
+
+    /** Whether this adapter supports keyset paging: always, via an ORDER BY / LIMIT / `>`-seeked MATCH. */
+    public get CanPage(): boolean
     {
         return true;
     }
@@ -87,6 +106,64 @@ export class CypherAdapter implements IDataSourceAdapter
         const rows = await this.session.Run(cypher, {});
         const records = rows.map(r => (r[CypherAdapter.PropsAlias] ?? {}) as Record<string, unknown>);
         return ExternalQuery.Apply(records, request);
+    }
+
+    /**
+     * Keyset page: MATCH with the Where terms and a strict `n.key > $after` seek ANDed, ordered ascending on
+     * the key and limited to page.Limit at the source. Where is still re-applied in-adapter (existing
+     * contract). NextAfter is the last fetched node's key, only when a full page came back.
+     */
+    public async QueryPage(request: QueryRequest, page: PageQuery): Promise<PageSlice>
+    {
+        if (!Number.isInteger(page.Limit) || page.Limit <= 0)
+        {
+            throw new Error(CypherAdapter.InvalidLimitMessage);
+        }
+        const rawKey = request.OrderKey ?? request.Fields[0];
+        if (rawKey === undefined)
+        {
+            throw new Error(CypherAdapter.MissingOrderKeyMessage);
+        }
+        const v = CypherAdapter.NodeVar;
+        const keyRef = `${v}${CypherAdapter.Dot}${CypherIdentifier.Quote(rawKey)}`;
+        const label = CypherIdentifier.Quote(request.Source);
+        const params: Record<string, unknown> = {};
+        const terms: string[] = [];
+        if (page.After !== undefined)
+        {
+            terms.push(`${keyRef} ${CypherAdapter.GreaterOp} ${CypherAdapter.ParamPrefix}${CypherAdapter.AfterParam}`);
+            params[CypherAdapter.AfterParam] = page.After;
+        }
+        (request.Where?.All ?? []).forEach((c, i) =>
+        {
+            const name = `${CypherAdapter.WhereParamPrefix}${i}`;
+            terms.push(CypherAdapter.WhereTerm(c, name));
+            params[name] = c.Value;
+        });
+        params[CypherAdapter.LimitParam] = page.Limit;
+        const parts = [CypherAdapter.Match, `${CypherAdapter.OpenParen}${v}${CypherAdapter.Colon}${label}${CypherAdapter.CloseParen}`];
+        if (terms.length > 0)
+        {
+            parts.push(CypherAdapter.Where, terms.join(`${CypherAdapter.Space}${CypherAdapter.And}${CypherAdapter.Space}`));
+        }
+        parts.push(CypherAdapter.Return, `${CypherAdapter.PropertiesFn}${CypherAdapter.OpenParen}${v}${CypherAdapter.CloseParen}`,
+            CypherAdapter.AsKeyword, CypherAdapter.PropsAlias, CypherAdapter.OrderBy, keyRef, CypherAdapter.Limit,
+            `${CypherAdapter.ToIntegerFn}${CypherAdapter.OpenParen}${CypherAdapter.ParamPrefix}${CypherAdapter.LimitParam}${CypherAdapter.CloseParen}`);
+        const rows = await this.session.Run(parts.join(CypherAdapter.Space), params);
+        const raw = rows.map(r => (r[CypherAdapter.PropsAlias] ?? {}) as Record<string, unknown>);
+        const records = ExternalQuery.Apply(raw, request);
+        const lastKey = raw.length === page.Limit ? raw[raw.length - 1]![rawKey] : undefined;
+        if (lastKey == null)
+        {
+            return { Records: records };
+        }
+        return { Records: records, NextAfter: lastKey as ExternalFieldValue };
+    }
+
+    private static WhereTerm(c: QueryComparison, param: string): string
+    {
+        const op = c.Op === QueryCompareOp.Neq ? CypherAdapter.NotEqualOp : CypherAdapter.EqualOp;
+        return `${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(c.Field)} ${op} ${CypherAdapter.ParamPrefix}${param}`;
     }
 
     /** Dispatches on the batch's atomicity axis: resilient Sequential apply, or all-or-nothing Transactional. */

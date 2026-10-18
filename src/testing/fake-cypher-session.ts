@@ -13,6 +13,7 @@ export class FakeCypherSession implements ICypherSession
 {
     private static readonly SeedIdField = "id";
     private static readonly Empty = "";
+    private static readonly ReturnMarker = ` ${CypherAdapter.Return} `;
     private static readonly Backtick = "`";
     private static readonly EscapedBacktick = "``";
     // (n:`Label` {`idField`: $key}) -- quoted names may contain doubled backticks.
@@ -57,7 +58,10 @@ export class FakeCypherSession implements ICypherSession
             bucket?.delete(key);
             return [];
         }
-        const returned = tail.slice(CypherAdapter.Return.length).trimStart();
+        // A paged read carries a WHERE clause before RETURN; skip it (the adapter re-applies Where in memory).
+        const returnAt = tail.indexOf(FakeCypherSession.ReturnMarker);
+        const afterWhere = tail.startsWith(CypherAdapter.Where) && returnAt >= 0 ? tail.slice(returnAt + 1) : tail;
+        const returned = afterWhere.slice(CypherAdapter.Return.length).trimStart();
         const versionMatch = FakeCypherSession.VersionFieldPattern.exec(returned);
         if (versionMatch !== null)
         {
