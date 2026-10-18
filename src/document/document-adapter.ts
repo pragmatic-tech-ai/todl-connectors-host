@@ -1,4 +1,4 @@
-import { RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { ConnectionFailureKind, RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { ExternalRecord, IDataSourceAdapter, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { MongoFilter } from "./mongo-filter.js";
@@ -11,6 +11,10 @@ export class DocumentAdapter implements IDataSourceAdapter
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly AtomicUnsupportedReason = "atomic write not supported by this connector";
 
+    private static readonly NetworkErrorNames: ReadonlySet<string> = new Set(["MongoNetworkError", "MongoServerSelectionError", "MongoNetworkTimeoutError"]);
+    private static readonly TransientLabels: ReadonlySet<string> = new Set(["RetryableWriteError", "ResumableChangeStreamError"]);
+    private static readonly AuthCodes: ReadonlySet<number> = new Set([18, 13]);
+
     public constructor(private readonly session: IDocumentSession)
     {
     }
@@ -19,6 +23,29 @@ export class DocumentAdapter implements IDataSourceAdapter
     public get CanVersion(): boolean
     {
         return true;
+    }
+
+    /** Depends only on the driver error's name, errorLabels and numeric code; never stringifies the error or reads a secret. */
+    public ClassifyFailure(error: unknown): ConnectionFailureKind
+    {
+        if (error === null || typeof error !== "object")
+        {
+            return ConnectionFailureKind.Permanent;
+        }
+        const e = error as { name?: unknown; errorLabels?: unknown; code?: unknown };
+        if (typeof e.name === "string" && DocumentAdapter.NetworkErrorNames.has(e.name))
+        {
+            return ConnectionFailureKind.Transient;
+        }
+        if (Array.isArray(e.errorLabels) && e.errorLabels.some(l => typeof l === "string" && DocumentAdapter.TransientLabels.has(l)))
+        {
+            return ConnectionFailureKind.Transient;
+        }
+        if (typeof e.code === "number" && DocumentAdapter.AuthCodes.has(e.code))
+        {
+            return ConnectionFailureKind.Auth;
+        }
+        return ConnectionFailureKind.Permanent;
     }
 
     /** Whether this adapter can run a batch inside a backend transaction: true iff its session can. */
