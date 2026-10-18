@@ -11,7 +11,7 @@ type NodeVersionState =
     | { Exists: false }
     | { Exists: true; Version: unknown };
 
-/** Graph adapter: MATCH to read (Where re-applied in-adapter), MERGE/DETACH DELETE to write. */
+/** Graph adapter: MATCH to read (Where is re-applied in-adapter for Query; for QueryPage it is pushed to the source for keyset paging), MERGE/DETACH DELETE to write. */
 export class CypherAdapter implements IDataSourceAdapter
 {
     public static readonly NodeVar = "n";
