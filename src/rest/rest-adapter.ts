@@ -48,10 +48,10 @@ export class RestAdapter implements IDataSourceAdapter
         return FetchFailureClassifier.Classify(error);
     }
 
-    /** Whether this adapter can page: true ONLY when the connection declares paging config (REST has no generic id column). */
+    /** Whether this adapter can page: true ONLY when the connection declares paging config AND the client can serve paged GETs (REST has no generic id column). */
     public get CanPage(): boolean
     {
-        return this.connection.paging !== undefined;
+        return this.connection.paging !== undefined && this.client.GetPage !== undefined;
     }
 
     /** Whether this adapter can run a batch inside a backend transaction: no, REST has no cross-request transaction. */
@@ -103,7 +103,15 @@ export class RestAdapter implements IDataSourceAdapter
     {
         const next = LinkHeader.Next(link);
         if (next === undefined) return undefined;
-        const value = new URL(next, this.connection.baseUrl).searchParams.get(tokenParam);
+        let value: string | null;
+        try
+        {
+            value = new URL(next, this.connection.baseUrl).searchParams.get(tokenParam);
+        }
+        catch
+        {
+            return undefined;
+        }
         return value === null || value.length === 0 ? undefined : value;
     }
 

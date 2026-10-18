@@ -439,3 +439,36 @@ test("graphql partial or malformed paging config is a clear config error", () =>
     assert.throws(() => GraphQlConnectionConfig.From({ ...GqlPagingConfig, itemsPath: "other.items" }), /graphql paging paths must start with the queryField/);
     assert.throws(() => GraphQlConnectionConfig.From({ ...GqlPagingConfig, pageFirstArg: "bad name" }), /not a valid identifier/);
 });
+
+test("graphql numeric cursor is sent as a string variable", async () =>
+{
+    const client = new PagedGraphQlClient({ customers: { items: [], pageInfo: { endCursor: 9 } } });
+    const adapter = new GraphQlAdapter(client, GraphQlConnectionConfig.From(GqlPagingConfig));
+    const slice = await adapter.QueryPage({ Source: Customer, Fields: ["id"] }, { Limit: 2, After: 5 });
+    assert.deepEqual(client.Sent[0]!.variables, { first: 2, after: "5" });
+    assert.equal(slice.NextAfter, 9);
+});
+
+test("graphql QueryPage throws when itemsPath is not an array", async () =>
+{
+    const client = new PagedGraphQlClient({ customers: { items: null, pageInfo: {} } });
+    const adapter = new GraphQlAdapter(client, GraphQlConnectionConfig.From(GqlPagingConfig));
+    await assert.rejects(adapter.QueryPage({ Source: Customer, Fields: ["id"] }, { Limit: 2 }), /non-array payload at itemsPath/);
+});
+
+test("graphql paging paths are compared by segment, so list and listCount are not nested", () =>
+{
+    const ok = GraphQlConnectionConfig.From({ ...GqlPagingConfig, itemsPath: "customers.list", nextTokenPath: "customers.listCount" });
+    assert.equal(ok.paging?.nextTokenPath, "customers.listCount");
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GqlPagingConfig, itemsPath: "customers.page", nextTokenPath: "customers.page.cursor" }), /graphql paging paths/);
+});
+
+test("graphql $.-prefixed paging paths resolve like plain paths", async () =>
+{
+    const client = new PagedGraphQlClient({ customers: { items: [{ id: "c1" }], pageInfo: { endCursor: "z" } } });
+    const config = { ...GqlPagingConfig, itemsPath: "$.customers.items", nextTokenPath: "$.customers.pageInfo.endCursor" };
+    const adapter = new GraphQlAdapter(client, GraphQlConnectionConfig.From(config));
+    const slice = await adapter.QueryPage({ Source: Customer, Fields: ["id"] }, { Limit: 1 });
+    assert.equal(slice.Records.length, 1);
+    assert.equal(slice.NextAfter, "z");
+});

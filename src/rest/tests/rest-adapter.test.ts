@@ -350,3 +350,41 @@ test("partial or contradictory paging config is a clear config error", () =>
     assert.throws(() => RestConnectionConfig.From({ ...PagingConfig, pageTokenParam: "t" }), /rest paging config requires/);
     assert.throws(() => RestConnectionConfig.From({ ...PagingConfig, linkHeader: "true" }), /rest paging config requires/);
 });
+
+test("a $.-prefixed itemsPath and nextTokenPath resolve like plain paths", async () =>
+{
+    const client = new PagedRestHttpClient(BaseUrl, { data: { items: [{ id: "a", label: "A" }] }, meta: { next: "t" } });
+    const adapter = new RestAdapter(client, RestConnectionConfig.From({ ...PagingConfig, itemsPath: "$.data.items", nextTokenPath: "$.meta.next" }));
+    const slice = await adapter.QueryPage(PageRequest, { Limit: 1 });
+    assert.equal(slice.Records.length, 1);
+    assert.equal(slice.NextAfter, "t");
+});
+
+test("a numeric next token round-trips into the after param", async () =>
+{
+    const client = new PagedRestHttpClient(BaseUrl, { data: { items: [] }, meta: { next: 42 } });
+    const adapter = new RestAdapter(client, RestConnectionConfig.From(PagingConfig));
+    const slice = await adapter.QueryPage(PageRequest, { Limit: 1, After: 7 });
+    assert.equal(slice.NextAfter, 42);
+    assert.equal(client.Urls[0], `${BaseUrl}/Customer?limit=1&after=7`);
+});
+
+test("a Link rel=next URL lacking the token param, or malformed, ends paging cleanly", async () =>
+{
+    const config = { baseUrl: BaseUrl, pageLimitParam: "limit", pageAfterParam: "after", itemsPath: "data.items", linkHeader: "true" };
+    const lacking = new RestAdapter(new PagedRestHttpClient(BaseUrl, { data: { items: [] } }, `<${BaseUrl}/Customer?page=2>; rel="next"`), RestConnectionConfig.From(config));
+    assert.equal((await lacking.QueryPage(PageRequest, { Limit: 2 })).NextAfter, undefined);
+    const malformed = new RestAdapter(new PagedRestHttpClient(BaseUrl, { data: { items: [] } }, `<http://[bad>; rel="next"`), RestConnectionConfig.From(config));
+    assert.equal((await malformed.QueryPage(PageRequest, { Limit: 2 })).NextAfter, undefined);
+});
+
+test("CanPage is false when paging is configured but the client has no GetPage", () =>
+{
+    const client = { GetJson: async () => [], Send: async () => ({ Status: 200, Body: undefined }) };
+    assert.equal(new RestAdapter(client, RestConnectionConfig.From(PagingConfig)).CanPage, false);
+});
+
+test("pageAfterParam together with both nextTokenPath and linkHeader is a config error", () =>
+{
+    assert.throws(() => RestConnectionConfig.From({ ...PagingConfig, pageAfterParam: "after", nextTokenPath: "meta.next", linkHeader: "true" }), /rest paging config requires/);
+});

@@ -106,7 +106,6 @@ export class GraphQlConnectionConfig
     private static readonly MissingMessage = "graphql connector config requires endpoint, source and queryField";
     private static readonly ReturnFieldSeparator = /[\s,]+/;
     private static readonly CodeSeparator = ",";
-    private static readonly PathJoin = ".";
 
     public static From(config: Record<string, string>, secret?: string): GraphQlConnection
     {
@@ -163,12 +162,16 @@ export class GraphQlConnectionConfig
         }
         const items = GraphQlConnectionConfig.PathBelow(itemsPath, queryField);
         const token = GraphQlConnectionConfig.PathBelow(nextTokenPath, queryField);
-        const nested = items.join(GraphQlConnectionConfig.PathJoin).startsWith(token.join(GraphQlConnectionConfig.PathJoin))
-            || token.join(GraphQlConnectionConfig.PathJoin).startsWith(items.join(GraphQlConnectionConfig.PathJoin));
-        if (nested) throw new Error(GraphQlConnectionConfig.PagingPathMessage);
+        if (GraphQlConnectionConfig.IsSegmentPrefix(items, token) || GraphQlConnectionConfig.IsSegmentPrefix(token, items)) throw new Error(GraphQlConnectionConfig.PagingPathMessage);
         return {
             firstArg: GraphQlName.Validate(firstArg), afterArg: GraphQlName.Validate(afterArg), itemsPath, nextTokenPath,
         };
+    }
+
+    /** True when `prefix` is an element-wise prefix of `path` (segment boundaries respected). */
+    private static IsSegmentPrefix(prefix: readonly string[], path: readonly string[]): boolean
+    {
+        return prefix.length <= path.length && prefix.every((segment, i) => segment === path[i]);
     }
 
     /** The path segments below the queryField (each a valid GraphQL name); throws when the path is not under it. */
@@ -238,6 +241,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
     private static readonly UpsertSelectionOpen = "){ ";
     private static readonly UpsertSelectionClose = " } }";
     private static readonly DeleteArgsClose = ") }";
+    private static readonly PageMalformedMessage = "graphql paged read returned a non-array payload at itemsPath";
     private static readonly PagingNotConfiguredMessage = "graphql paging is not configured for this connection";
     private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
     private static readonly PagedQueryOpen = "query($";
@@ -304,13 +308,14 @@ export class GraphQlAdapter implements IDataSourceAdapter
         if (!Number.isInteger(page.Limit) || page.Limit <= 0) throw new Error(GraphQlAdapter.InvalidLimitMessage);
         if (request.Source !== this.connection.source) return { Records: [] };
         const variables: Record<string, unknown> = { [paging.firstArg]: page.Limit };
-        if (page.After !== undefined) variables[paging.afterArg] = page.After;
+        if (page.After !== undefined) variables[paging.afterArg] = String(page.After);
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
             { [GraphQlAdapter.QueryKey]: this.PagedDocument(paging, GraphQlAdapter.Selection(request)), [GraphQlAdapter.VariablesKey]: variables });
         GraphQlAdapter.EnsureOk(response);
         const data = (response.Body as Record<string, unknown> | undefined)?.[GraphQlAdapter.DataKey];
         const items = JsonPath.Read(data, paging.itemsPath);
-        const records = Array.isArray(items) ? items as Record<string, unknown>[] : [];
+        if (!Array.isArray(items)) throw new Error(GraphQlAdapter.PageMalformedMessage);
+        const records = items as Record<string, unknown>[];
         const next = JsonPath.AsToken(JsonPath.Read(data, paging.nextTokenPath));
         const applied = ExternalQuery.Apply(records, request);
         return next === undefined ? { Records: applied } : { Records: applied, NextAfter: next as ExternalFieldValue };
