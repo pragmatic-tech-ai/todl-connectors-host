@@ -26,10 +26,16 @@ class GraphQlAdapterFixture
 
     public static Make(config: Record<string, string>): GraphQlAdapter
     {
-        const cfg = GraphQlConnectionConfig.From(config);
+        return GraphQlAdapterFixture.Build(config).adapter;
+    }
+
+    /** Builds an adapter over a seeded fake, returning the fake too so a test can assert what was sent/inject errors. */
+    public static Build(config: Record<string, string>, secret?: string): { adapter: GraphQlAdapter; client: FakeGraphQlHttpClient }
+    {
+        const cfg = GraphQlConnectionConfig.From(config, secret);
         const client = new FakeGraphQlHttpClient(cfg);
         client.Seed([{ id: "c1", label: "Acme" }]);
-        return new GraphQlAdapter(client, cfg);
+        return { adapter: new GraphQlAdapter(client, cfg), client };
     }
 
     public static LastWriteWins(ops: WriteBatch["Operations"]): WriteBatch
@@ -132,7 +138,7 @@ test("writes with no configured mutation are Unsupported, never throw", async ()
     assert.match(result.Failures[0]!.Reason, /not configured/);
 });
 
-test("a configured upsert whose response has errors is a secret-free Error failure", async () =>
+test("a configured upsert whose response has an uncoded error is a secret-free Error failure", async () =>
 {
     const cfg = GraphQlConnectionConfig.From(GraphQlAdapterFixture.ConfigFull(), "sekret");
     const adapter = new GraphQlAdapter(new ErrorClient(cfg), cfg);
@@ -141,7 +147,7 @@ test("a configured upsert whose response has errors is a secret-free Error failu
     assert.equal(result.Applied, 0);
     assert.equal(result.Failures.length, 1);
     assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Error);
-    assert.match(result.Failures[0]!.Reason, /graphql request failed/);
+    assert.equal(result.Failures[0]!.Reason, "boom");
     assert.ok(!result.Failures[0]!.Reason.includes("sekret"));
 });
 
@@ -171,4 +177,147 @@ test("Where on an unprojected field still filters, projection stays narrow", asy
     const rows = await new GraphQlAdapter(client, cfg).Query(
         { Source: Customer, Fields: ["id"], Where: { All: [{ Field: "tier", Op: QueryCompareOp.Eq, Value: "gold" }] } });
     assert.deepEqual(rows, [{ id: "c1" }]);
+});
+
+test("upsert emits the configured input type, arg and return selection", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(),
+        upsertInputType: "CustomerInput", upsertInputArg: "data", upsertReturn: "id name" });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Applied, 1);
+    assert.equal(client.Sent.at(-1)!.Query, "mutation($data: CustomerInput!){ upsertCustomer(data: $data){ id name } }");
+    assert.deepEqual(client.Sent.at(-1)!.Variables, { data: { label: "x", id: "c1" } });
+});
+
+test("upsert defaults reproduce today's JSON! document", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build(GraphQlAdapterFixture.ConfigFull());
+    await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(client.Sent.at(-1)!.Query, "mutation($input: JSON!){ upsertCustomer(input: $input){ id } }");
+    assert.deepEqual(client.Sent.at(-1)!.Variables, { input: { label: "x", id: "c1" } });
+});
+
+test("delete emits the configured id type and arg", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(),
+        deleteIdType: "String", deleteIdArg: "key" });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Delete, Key: "c1", Fields: {} }]));
+    assert.equal(result.Applied, 1);
+    assert.equal(client.Sent.at(-1)!.Query, "mutation($key: String!){ deleteCustomer(key: $key) }");
+    assert.deepEqual(client.Sent.at(-1)!.Variables, { key: "c1" });
+});
+
+test("delete defaults reproduce today's ID! document", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build(GraphQlAdapterFixture.ConfigFull());
+    await adapter.Apply(GraphQlAdapterFixture.LastWriteWins([{ Kind: WriteOperationKind.Delete, Key: "c1", Fields: {} }]));
+    assert.equal(client.Sent.at(-1)!.Query, "mutation($id: ID!){ deleteCustomer(id: $id) }");
+    assert.deepEqual(client.Sent.at(-1)!.Variables, { id: "c1" });
+});
+
+test("a returned id different from the written key is an Error failure", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build(GraphQlAdapterFixture.ConfigFull());
+    client.Inject("c1", { ReturnId: "cZ" });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Error);
+    assert.match(result.Failures[0]!.Reason, /different id/);
+});
+
+test("a GraphQL error with a configured conflict code is a Conflict failure", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(), errorConflictCodes: "E_CONFLICT,E_DUP" });
+    client.Inject("c1", { Errors: [{ Message: "duplicate key", Code: "E_DUP" }] });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Conflict);
+    assert.equal(result.Failures[0]!.Reason, "duplicate key");
+});
+
+test("a GraphQL error with a configured unsupported code is an Unsupported failure", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(), errorUnsupportedCodes: "E_UNSUP" });
+    client.Inject("c1", { Errors: [{ Message: "not allowed", Code: "E_UNSUP" }] });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Unsupported);
+    assert.equal(result.Failures[0]!.Reason, "not allowed");
+});
+
+test("a GraphQL error with any other code is an Error failure", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(),
+        errorConflictCodes: "E_CONFLICT", errorUnsupportedCodes: "E_UNSUP" });
+    client.Inject("c1", { Errors: [{ Message: "boom", Code: "E_OTHER" }] });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Error);
+    assert.equal(result.Failures[0]!.Reason, "boom");
+});
+
+test("the error targeting the op by path is the one mapped", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(), errorConflictCodes: "E_CONFLICT" });
+    client.Inject("c1", { Errors: [
+        { Message: "unrelated", Code: "E_OTHER", Path: ["somethingElse"] },
+        { Message: "mine", Code: "E_CONFLICT", Path: ["upsertCustomer"] }] });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Conflict);
+    assert.equal(result.Failures[0]!.Reason, "mine");
+});
+
+test("the failure reason carries only the GraphQL message, never variables/headers/extensions", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build(GraphQlAdapterFixture.ConfigFull(), "sekret");
+    client.Inject("c1", { Errors: [{ Message: "Name is required", Code: "VALIDATION", Extensions: { internalToken: "topsecret123" } }] });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "SensitiveValue" } }]));
+    const reason = result.Failures[0]!.Reason;
+    assert.equal(reason, "Name is required");
+    assert.ok(!reason.includes("topsecret123"));
+    assert.ok(!reason.includes("sekret"));
+    assert.ok(!reason.includes("SensitiveValue"));
+    assert.ok(!reason.includes("VALIDATION"));
+});
+
+test("data present together with errors is a failure, not Applied", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(), errorConflictCodes: "E_DUP" });
+    client.Inject("c1", { Errors: [{ Message: "partial", Code: "E_DUP" }], WithData: true });
+    const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Conflict);
+});
+
+test("a wrong batch.Source does not issue a write", async () =>
+{
+    const { adapter, client } = GraphQlAdapterFixture.Build(GraphQlAdapterFixture.ConfigFull());
+    const result = await adapter.Apply({
+        Source: "Other", IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }],
+    });
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Error);
+    assert.equal(client.Sent.length, 0);
+});
+
+test("an invalid configured identifier is rejected at construction", () =>
+{
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), upsertInputType: "Bad Type" }), /not a valid identifier/);
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), upsertInputArg: "in put" }), /not a valid identifier/);
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), upsertReturn: "id bad}" }), /not a valid identifier/);
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), deleteIdType: "ID!" }), /not a valid identifier/);
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), deleteIdArg: "1bad" }), /not a valid identifier/);
 });
