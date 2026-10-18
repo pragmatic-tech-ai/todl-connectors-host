@@ -74,9 +74,12 @@ export class PgSqlSession extends PgSessionBase
     private static readonly Begin = "BEGIN";
     private static readonly Commit = "COMMIT";
     private static readonly Rollback = "ROLLBACK";
+    private static readonly RollbackErrorProperty = "rollbackError";
 
     public constructor(private readonly pool: Pool)
     {
+        // pg's Pool.query has a wider overload set than IPgQueryable's single (sql, params) signature,
+        // so it is not structurally assignable; the double cast bridges to the one overload we call.
         super(pool as unknown as IPgQueryable);
     }
 
@@ -97,7 +100,19 @@ export class PgSqlSession extends PgSessionBase
         }
         catch (error)
         {
-            await client.query(PgSqlSession.Rollback);
+            try
+            {
+                await client.query(PgSqlSession.Rollback);
+            }
+            catch (rollbackError)
+            {
+                // A throwing ROLLBACK must never replace the original work error (that is the one the
+                // caller must see); attach it as context on the original instead of letting it propagate.
+                if (error !== null && typeof error === "object")
+                {
+                    (error as Record<string, unknown>)[PgSqlSession.RollbackErrorProperty] = rollbackError;
+                }
+            }
             throw error;
         }
         finally
@@ -117,6 +132,8 @@ class PgPinnedClientSession extends PgSessionBase
 {
     public constructor(client: PoolClient)
     {
+        // pg's PoolClient.query has the same wider overload set as Pool, so (like Pool) it is not
+        // structurally assignable to IPgQueryable; the double cast bridges to the one overload we call.
         super(client as unknown as IPgQueryable);
     }
 }

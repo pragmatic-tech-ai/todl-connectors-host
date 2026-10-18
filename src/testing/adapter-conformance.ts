@@ -16,6 +16,19 @@ const ThirdId = "c3";
 const ThirdLabel = "Initech";
 const UpdatedLabel = "Acme 2";
 
+/** Per-fixture fidelity knobs for a conformance run (the backing store's limitations, not the adapter's). */
+export interface AdapterConformanceOptions
+{
+    /**
+     * Whether the backing store faithfully reports the affected-row count of an optimistic version guard.
+     * Defaults true. The pg-mem fixture sets this false: its INSERT ... ON CONFLICT DO UPDATE ... WHERE
+     * command tag reports rowCount 1 even when the WHERE excluded the row, so the guard's fail-closed /
+     * mid-batch-conflict semantics cannot be validated offline. Real Postgres (the gated live conformance)
+     * reports 0 correctly, so it leaves this at the default and exercises the version cases for real.
+     */
+    readonly HonorsVersionGuard?: boolean;
+}
+
 /**
  * Contract every data-source adapter must satisfy. The adapter returned by `make`
  * must hold source Customer seeded with a record { id, label } = c1/Acme.
@@ -24,14 +37,26 @@ const UpdatedLabel = "Acme 2";
  *
  * The transaction/version cases are parameterized by the adapter's advertised capabilities: the
  * multi-op and atomic-rollback cases register only when the adapter CanTransact (and the rollback case
- * additionally needs CanVersion to drive a mid-batch conflict), and the optimistic fail-closed case only
- * when it CanVersion. An adapter that advertises neither runs just the capability-free contract cases.
+ * additionally needs a honored version guard to drive a mid-batch conflict), and the optimistic
+ * fail-closed case only when the adapter CanVersion. A version case additionally requires the fixture to
+ * honor the guard (see {@link AdapterConformanceOptions.HonorsVersionGuard}), so a low-fidelity offline
+ * backend can advertise the real capability yet skip cases it cannot emulate. An adapter that advertises
+ * neither capability runs just the capability-free contract cases.
  */
-export function describeDataSourceAdapter(name: string, make: () => IDataSourceAdapter): void
+export function describeDataSourceAdapter(name: string, make: () => IDataSourceAdapter, options?: AdapterConformanceOptions): void
 {
     const caps = make();
     const canTransact = WriteCapability.CanTransact(caps);
     const canVersion = WriteCapability.CanVersion(caps);
+    // A version-guard case needs both the adapter's capability and a fixture that honors the guard.
+    const canVerifyVersionGuard = canVersion && (options?.HonorsVersionGuard ?? true);
+
+    // The probe above is only consulted for its advertised capabilities; release its connection/pool
+    // so it does not leak (every behavioral case below opens its own fresh adapter via make()).
+    test(`${name}: releases the capability-probe adapter`, async () =>
+    {
+        await caps.Dispose();
+    });
 
     test(`${name}: Query returns only the requested fields per record`, async () =>
     {
@@ -93,8 +118,9 @@ export function describeDataSourceAdapter(name: string, make: () => IDataSourceA
     // CanVersion: an optimistic upsert with NO version against the present seed row must fail CLOSED --
     // a Conflict with the stored row untouched, never a silent overwrite (#7). Portable across adapters:
     // a record-reading adapter sees present-but-unversioned, a header-based one (REST) has no version to
-    // enforce; both must refuse. Skipped by adapters that cannot version (GraphQL, SQL).
-    if (canVersion)
+    // enforce; both must refuse. Skipped by adapters that cannot version (GraphQL) and by fixtures that
+    // cannot honor the guard (offline pg-mem; real Postgres runs it via the gated live conformance).
+    if (canVerifyVersionGuard)
     {
         test(`${name}: an optimistic upsert with no version fails closed (Conflict), leaving the row intact`, async () =>
         {
@@ -132,9 +158,9 @@ export function describeDataSourceAdapter(name: string, make: () => IDataSourceA
         });
     }
 
-    // CanTransact AND CanVersion: a transactional batch whose later op conflicts (fail-closed on the
-    // present-but-unversioned seed) rolls the whole batch back -- the earlier insert must not persist.
-    if (canTransact && canVersion)
+    // CanTransact AND a honored version guard: a transactional batch whose later op conflicts (fail-closed
+    // on the present-but-unversioned seed) rolls the whole batch back -- the earlier insert must not persist.
+    if (canTransact && canVerifyVersionGuard)
     {
         test(`${name}: a transactional batch rolls back entirely when one op conflicts`, async () =>
         {

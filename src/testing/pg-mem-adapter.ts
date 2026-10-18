@@ -7,8 +7,10 @@ import { PgSqlSession } from "../sql/pg-sql-session.js";
 /** Builds pg-mem-backed SqlAdapters pre-seeded with Customer(id PRIMARY KEY, label) = c1/Acme. */
 export class PgMemAdapterHarness
 {
-    /** Single home of the fixture table shape (id MUST be PRIMARY KEY for the engine's ON CONFLICT upsert). */
-    public static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text)';
+    /** Single home of the fixture table shape (id MUST be PRIMARY KEY for the engine's ON CONFLICT upsert).
+     *  Carries the `rev` version column so the optimistic version-guard conformance cases (SqlAdapter now
+     *  advertises CanVersion) have a column to guard on; the seed leaves it NULL (present-but-unversioned). */
+    public static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text, rev text)';
     public static readonly SeedSql = `INSERT INTO "Customer" (id, label) VALUES ('c1', 'Acme')`;
 
     /** A fresh, isolated in-process database per call. */

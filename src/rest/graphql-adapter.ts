@@ -4,6 +4,7 @@ import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { RestHttpMethod } from "./rest-http-client.js";
 import type { IRestHttpClient, RestResponse } from "./rest-http-client.js";
+import { RestWriteReasons } from "./write-reasons.js";
 
 /** Parsed GraphQL connection. One adapter instance serves exactly one `source` via `queryField`. */
 export interface GraphQlConnection
@@ -71,7 +72,6 @@ export class GraphQlName
 export class GraphQlAdapter implements IDataSourceAdapter
 {
     private static readonly WriteNotConfiguredReason = "graphql write not configured";
-    private static readonly TransactionUnsupportedReason = "transactional write not supported by this connector";
     private static readonly OptimisticUnsupportedReason = "optimistic write not supported by this connector (graphql cannot version)";
     private static readonly DataKey = "data";
     private static readonly ErrorsKey = "errors";
@@ -131,7 +131,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
     {
         if (batch.Atomicity === WriteAtomicity.Transactional)
         {
-            return GraphQlAdapter.AllUnsupported(batch, GraphQlAdapter.TransactionUnsupportedReason);
+            return GraphQlAdapter.AllUnsupported(batch, RestWriteReasons.TransactionUnsupported);
         }
         if (batch.Concurrency === WriteConcurrency.Optimistic)
         {
@@ -193,8 +193,9 @@ export class GraphQlAdapter implements IDataSourceAdapter
                 return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.WriteNotConfiguredReason };
             }
             // Assumes a schema convention: a JSON! input scalar (richer/configurable write types are a documented deferral).
+            // batch.IdKey is already validated up-front in Apply before the op loop, so it is trusted here.
             const document = GraphQlAdapter.UpsertPrefix + GraphQlName.Validate(this.connection.upsertMutation) + GraphQlAdapter.UpsertArgs
-                + GraphQlName.Validate(batch.IdKey) + GraphQlAdapter.UpsertSuffix;
+                + batch.IdKey + GraphQlAdapter.UpsertSuffix;
             const input = { ...op.Fields, [batch.IdKey]: op.Key };
             const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
                 { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [GraphQlAdapter.InputVariable]: input } });

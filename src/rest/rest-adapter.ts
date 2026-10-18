@@ -5,6 +5,7 @@ import { ExternalQuery } from "../query/external-query.js";
 import { RestHttpMethod } from "./rest-http-client.js";
 import type { IRestHttpClient } from "./rest-http-client.js";
 import type { RestConnection } from "./rest-connection-config.js";
+import { RestWriteReasons } from "./write-reasons.js";
 
 /** REST adapter: GET a collection, PUT/DELETE a resource; Where re-applied in-adapter. */
 export class RestAdapter implements IDataSourceAdapter
@@ -18,7 +19,6 @@ export class RestAdapter implements IDataSourceAdapter
     private static readonly SuccessMax = 299;
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly UnversionedConflictReason = "optimistic write requires a version REST can enforce via If-Match";
-    private static readonly TransactionUnsupportedReason = "transactional write not supported by this connector";
     private static readonly WriteFailedMessage = "rest write failed with status";
     private static readonly ReadMalformedMessage = "rest read returned a non-array payload";
 
@@ -60,7 +60,7 @@ export class RestAdapter implements IDataSourceAdapter
                 Failures: batch.Operations.map(op => ({
                     Key: op.Key,
                     Kind: WriteFailureKind.Unsupported,
-                    Reason: RestAdapter.TransactionUnsupportedReason,
+                    Reason: RestWriteReasons.TransactionUnsupported,
                 })),
             };
         }
