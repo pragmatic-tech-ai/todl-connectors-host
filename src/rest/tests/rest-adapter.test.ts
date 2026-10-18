@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { ConnectionFailureKind, QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { WriteBatch } from "@pragmatic-tech-ai/todl";
 import { RestAdapter } from "../rest-adapter.js";
 import { RestConnectionConfig } from "../rest-connection-config.js";
@@ -246,4 +246,13 @@ test("a non-array GET payload throws instead of reading as empty", async () =>
     const client = { GetJson: async () => ({ not: "array" }), Send: async () => ({ Status: 200, Body: undefined }) };
     const adapter = new RestAdapter(client, RestConnectionConfig.From({ baseUrl: BaseUrl }));
     await assert.rejects(adapter.Query({ Source: Customer, Fields: ["id"] }), /non-array/);
+});
+
+test("RestAdapter.ClassifyFailure delegates to the fetch classifier", () =>
+{
+    const adapter = new RestAdapter({ GetJson: async () => [], Send: async () => ({ Status: 200, Body: undefined }) }, RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    assert.equal(adapter.ClassifyFailure({ status: 503 }), ConnectionFailureKind.Transient);
+    assert.equal(adapter.ClassifyFailure(new TypeError("fetch failed")), ConnectionFailureKind.Transient);
+    assert.equal(adapter.ClassifyFailure({ status: 401 }), ConnectionFailureKind.Auth);
+    assert.equal(adapter.ClassifyFailure({ status: 404 }), ConnectionFailureKind.Permanent);
 });

@@ -20,6 +20,18 @@ export interface IRestHttpClient
     Send(method: RestHttpMethod, url: string, headers: Record<string, string>, body?: unknown): Promise<RestResponse>;
 }
 
+/** A non-2xx transport failure carrying its numeric HTTP status (the message stays "http request failed with status <N>"). */
+export class HttpStatusError extends Error
+{
+    private static readonly ErrorName = "HttpStatusError";
+
+    public constructor(message: string, public readonly status: number)
+    {
+        super(message);
+        this.name = HttpStatusError.ErrorName;
+    }
+}
+
 /** Production client over global fetch: HTTPS enforced for non-localhost, bounded timeout. */
 export class FetchRestHttpClient implements IRestHttpClient
 {
@@ -44,7 +56,7 @@ export class FetchRestHttpClient implements IRestHttpClient
     {
         FetchRestHttpClient.EnforceTransport(url);
         const response = await this.fetchFn(url, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
-        if (!response.ok) throw new Error(`${FetchRestHttpClient.NonOkMessage} ${response.status}`);
+        if (!response.ok) throw new HttpStatusError(`${FetchRestHttpClient.NonOkMessage} ${response.status}`, response.status);
         return response.json();
     }
 

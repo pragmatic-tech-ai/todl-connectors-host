@@ -1,7 +1,8 @@
-import { WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { ConnectionFailureKind, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { ExternalRecord, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
+import { FetchFailureClassifier } from "./fetch-failure-classifier.js";
 import { RestHttpMethod } from "./rest-http-client.js";
 import type { IRestHttpClient, RestResponse } from "./rest-http-client.js";
 import { RestWriteReasons } from "./write-reasons.js";
@@ -157,6 +158,12 @@ export class GraphQlAdapter implements IDataSourceAdapter
     public get CanVersion(): boolean
     {
         return false;
+    }
+
+    /** Delegates to {@link FetchFailureClassifier}: a pure function of the thrown transport error. */
+    public ClassifyFailure(error: unknown): ConnectionFailureKind
+    {
+        return FetchFailureClassifier.Classify(error);
     }
 
     /** Whether this adapter can run a batch inside a backend transaction: no, each mutation is its own request. */

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { ConnectionFailureKind, QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { WriteBatch } from "@pragmatic-tech-ai/todl";
 import { GraphQlAdapter, GraphQlConnectionConfig, GraphQlName } from "../graphql-adapter.js";
 import { RestHttpMethod } from "../rest-http-client.js";
@@ -340,4 +340,13 @@ test("an invalid configured identifier is rejected at construction", () =>
     assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), upsertReturn: "id bad}" }), /not a valid identifier/);
     assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), deleteIdType: "ID!" }), /not a valid identifier/);
     assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigFull(), deleteIdArg: "1bad" }), /not a valid identifier/);
+});
+
+test("GraphQlAdapter.ClassifyFailure delegates to the fetch classifier", () =>
+{
+    const adapter = new GraphQlAdapter({ GetJson: async () => [], Send: async () => ({ Status: 200, Body: undefined }) }, GraphQlConnectionConfig.From(GraphQlAdapterFixture.ConfigFull()));
+    assert.equal(adapter.ClassifyFailure({ status: 503 }), ConnectionFailureKind.Transient);
+    assert.equal(adapter.ClassifyFailure(new TypeError("fetch failed")), ConnectionFailureKind.Transient);
+    assert.equal(adapter.ClassifyFailure({ status: 401 }), ConnectionFailureKind.Auth);
+    assert.equal(adapter.ClassifyFailure({ status: 404 }), ConnectionFailureKind.Permanent);
 });
