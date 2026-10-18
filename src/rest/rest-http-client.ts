@@ -13,11 +13,20 @@ export interface RestResponse
     readonly Body: unknown;
 }
 
+/** A paged GET result: the parsed JSON envelope plus the raw Link header (for rel="next" paging). */
+export interface RestPageResponse
+{
+    readonly Body: unknown;
+    readonly Link?: string;
+}
+
 /** The injected HTTP seam: adapters own URLs/bodies, the host owns transport. */
 export interface IRestHttpClient
 {
     GetJson(url: string, headers: Record<string, string>): Promise<unknown>;
     Send(method: RestHttpMethod, url: string, headers: Record<string, string>, body?: unknown): Promise<RestResponse>;
+    /** Paged GET surfacing the envelope + Link header. Optional so non-paging clients keep compiling. */
+    GetPage?(url: string, headers: Record<string, string>): Promise<RestPageResponse>;
 }
 
 /** A non-2xx transport failure carrying its numeric HTTP status (the message stays "http request failed with status <N>"). */
@@ -38,6 +47,7 @@ export class FetchRestHttpClient implements IRestHttpClient
     private static readonly HttpsProtocol = "https:";
     private static readonly LocalHosts: readonly string[] = ["localhost", "127.0.0.1", "[::1]"];
     private static readonly InsecureMessage = "refusing non-https request to non-localhost host";
+    private static readonly LinkHeaderName = "link";
     private static readonly ContentTypeHeader = "content-type";
     private static readonly JsonContentType = "application/json";
     private static readonly DefaultTimeoutMs = 30000;
@@ -58,6 +68,15 @@ export class FetchRestHttpClient implements IRestHttpClient
         const response = await this.fetchFn(url, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
         if (!response.ok) throw new HttpStatusError(`${FetchRestHttpClient.NonOkMessage} ${response.status}`, response.status);
         return response.json();
+    }
+
+    public async GetPage(url: string, headers: Record<string, string>): Promise<RestPageResponse>
+    {
+        FetchRestHttpClient.EnforceTransport(url);
+        const response = await this.fetchFn(url, { headers, signal: AbortSignal.timeout(this.timeoutMs) });
+        if (!response.ok) throw new HttpStatusError(`${FetchRestHttpClient.NonOkMessage} ${response.status}`, response.status);
+        const link = response.headers.get(FetchRestHttpClient.LinkHeaderName) ?? undefined;
+        return { Body: await response.json(), ...(link !== undefined ? { Link: link } : {}) };
     }
 
     public async Send(method: RestHttpMethod, url: string, headers: Record<string, string>, body?: unknown): Promise<RestResponse>

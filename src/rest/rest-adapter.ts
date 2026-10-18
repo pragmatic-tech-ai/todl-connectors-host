@@ -1,7 +1,9 @@
 import { ConnectionFailureKind, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalRecord, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
+import { JsonPath } from "./json-path.js";
+import { LinkHeader } from "./rest-paging.js";
 import { FetchFailureClassifier } from "./fetch-failure-classifier.js";
 import { RestHttpMethod } from "./rest-http-client.js";
 import type { IRestHttpClient } from "./rest-http-client.js";
@@ -22,6 +24,13 @@ export class RestAdapter implements IDataSourceAdapter
     private static readonly UnversionedConflictReason = "optimistic write requires a version REST can enforce via If-Match";
     private static readonly WriteFailedMessage = "rest write failed with status";
     private static readonly ReadMalformedMessage = "rest read returned a non-array payload";
+    private static readonly PageMalformedMessage = "rest paged read returned a non-array payload at itemsPath";
+    private static readonly PagingNotConfiguredMessage = "rest paging is not configured for this connection";
+    private static readonly PagingClientMessage = "rest http client does not support paged reads";
+    private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
+    private static readonly QueryStart = "?";
+    private static readonly QueryJoin = "&";
+    private static readonly ParamPair = "=";
 
     public constructor(private readonly client: IRestHttpClient, private readonly connection: RestConnection)
     {
@@ -39,6 +48,12 @@ export class RestAdapter implements IDataSourceAdapter
         return FetchFailureClassifier.Classify(error);
     }
 
+    /** Whether this adapter can page: true ONLY when the connection declares paging config (REST has no generic id column). */
+    public get CanPage(): boolean
+    {
+        return this.connection.paging !== undefined;
+    }
+
     /** Whether this adapter can run a batch inside a backend transaction: no, REST has no cross-request transaction. */
     public get CanTransact(): boolean
     {
@@ -51,6 +66,45 @@ export class RestAdapter implements IDataSourceAdapter
         const payload = await this.client.GetJson(url, this.connection.headers);
         if (!Array.isArray(payload)) throw new Error(RestAdapter.ReadMalformedMessage);
         return ExternalQuery.Apply(payload as Record<string, unknown>[], request);
+    }
+
+    /**
+     * Declared-config page: sends the limit and (when set) the opaque page token as the configured query
+     * params, reads records from itemsPath and the next token from nextTokenPath or the Link rel="next"
+     * header. NextAfter is set only when the envelope carries a next token. Where is re-applied to the
+     * page in-adapter (a filtered page may be short; NextAfter still tracks the source's cursor).
+     */
+    public async QueryPage(request: QueryRequest, page: PageQuery): Promise<PageSlice>
+    {
+        const paging = this.connection.paging;
+        if (paging === undefined) throw new Error(RestAdapter.PagingNotConfiguredMessage);
+        if (!Number.isInteger(page.Limit) || page.Limit <= 0) throw new Error(RestAdapter.InvalidLimitMessage);
+        if (this.client.GetPage === undefined) throw new Error(RestAdapter.PagingClientMessage);
+        const params = [RestAdapter.Param(paging.limitParam, page.Limit)];
+        if (page.After !== undefined) params.push(RestAdapter.Param(paging.tokenParam, page.After));
+        const url = this.CollectionUrl(request.Source) + RestAdapter.QueryStart + params.join(RestAdapter.QueryJoin);
+        const response = await this.client.GetPage(url, this.connection.headers);
+        const items = JsonPath.Read(response.Body, paging.itemsPath);
+        if (!Array.isArray(items)) throw new Error(RestAdapter.PageMalformedMessage);
+        const records = ExternalQuery.Apply(items as Record<string, unknown>[], request);
+        const next = paging.useLinkHeader
+            ? this.LinkToken(response.Link, paging.tokenParam)
+            : JsonPath.AsToken(JsonPath.Read(response.Body, paging.nextTokenPath!));
+        return next === undefined ? { Records: records } : { Records: records, NextAfter: next as ExternalFieldValue };
+    }
+
+    private static Param(name: string, value: ExternalFieldValue | number): string
+    {
+        return encodeURIComponent(name) + RestAdapter.ParamPair + encodeURIComponent(String(value));
+    }
+
+    /** The token param's value from the Link rel="next" URL; undefined when there is no next link or it lacks the param. */
+    private LinkToken(link: string | undefined, tokenParam: string): string | undefined
+    {
+        const next = LinkHeader.Next(link);
+        if (next === undefined) return undefined;
+        const value = new URL(next, this.connection.baseUrl).searchParams.get(tokenParam);
+        return value === null || value.length === 0 ? undefined : value;
     }
 
     /**

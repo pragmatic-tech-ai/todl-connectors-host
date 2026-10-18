@@ -370,3 +370,72 @@ test("a 200 carrying GraphQL errors is a normal write failure and is never route
         classify.mock.restore();
     }
 });
+
+/** Replays a programmed GraphQL data payload and records the sent document + variables. */
+class PagedGraphQlClient
+{
+    public readonly Sent: { query: string; variables?: Record<string, unknown> }[] = [];
+
+    public constructor(private readonly data: unknown)
+    {
+    }
+
+    public async GetJson(): Promise<unknown>
+    {
+        return undefined;
+    }
+
+    public async Send(_m: RestHttpMethod, _u: string, _h: Record<string, string>, body?: unknown): Promise<RestResponse>
+    {
+        this.Sent.push(body as { query: string; variables?: Record<string, unknown> });
+        return { Status: 200, Body: { data: this.data } };
+    }
+}
+
+const GqlPagingConfig = { ...GraphQlAdapterFixture.ConfigReadOnly(), pageFirstArg: "first", pageAfterArg: "after",
+    itemsPath: "customers.items", nextTokenPath: "customers.pageInfo.endCursor" };
+
+test("graphql CanPage is false without paging config and QueryPage throws", async () =>
+{
+    const adapter = GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigReadOnly());
+    assert.equal(adapter.CanPage, false);
+    await assert.rejects(adapter.QueryPage({ Source: Customer, Fields: ["id"] }, { Limit: 2 }), /paging is not configured/);
+});
+
+test("graphql QueryPage sends first/after variables and reads items + endCursor", async () =>
+{
+    const client = new PagedGraphQlClient({ customers: { items: [{ id: "c1", label: "A" }], pageInfo: { endCursor: "cur2" } } });
+    const adapter = new GraphQlAdapter(client, GraphQlConnectionConfig.From(GqlPagingConfig));
+    assert.equal(adapter.CanPage, true);
+    const slice = await adapter.QueryPage({ Source: Customer, Fields: ["id", "label"] }, { Limit: 1, After: "cur1" });
+    assert.equal(client.Sent[0]!.query,
+        "query($first: Int, $after: String){ customers(first: $first, after: $after){ items{ id label } pageInfo{ endCursor } } }");
+    assert.deepEqual(client.Sent[0]!.variables, { first: 1, after: "cur1" });
+    assert.deepEqual(slice.Records, [{ id: "c1", label: "A" }]);
+    assert.equal(slice.NextAfter, "cur2");
+});
+
+test("graphql QueryPage omits after on the first page and has no NextAfter when the cursor is null", async () =>
+{
+    const client = new PagedGraphQlClient({ customers: { items: [], pageInfo: { endCursor: null } } });
+    const adapter = new GraphQlAdapter(client, GraphQlConnectionConfig.From(GqlPagingConfig));
+    const slice = await adapter.QueryPage({ Source: Customer, Fields: ["id"] }, { Limit: 3 });
+    assert.deepEqual(client.Sent[0]!.variables, { first: 3 });
+    assert.equal(slice.NextAfter, undefined);
+});
+
+test("graphql QueryPage rejects a bad Limit and returns empty for a wrong source without a request", async () =>
+{
+    const client = new PagedGraphQlClient({ customers: { items: [], pageInfo: {} } });
+    const adapter = new GraphQlAdapter(client, GraphQlConnectionConfig.From(GqlPagingConfig));
+    await assert.rejects(adapter.QueryPage({ Source: Customer, Fields: ["id"] }, { Limit: -1 }), /positive integer/);
+    assert.deepEqual((await adapter.QueryPage({ Source: "Other", Fields: ["id"] }, { Limit: 2 })).Records, []);
+    assert.equal(client.Sent.length, 0);
+});
+
+test("graphql partial or malformed paging config is a clear config error", () =>
+{
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GraphQlAdapterFixture.ConfigReadOnly(), pageFirstArg: "first" }), /graphql paging config requires/);
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GqlPagingConfig, itemsPath: "other.items" }), /graphql paging paths must start with the queryField/);
+    assert.throws(() => GraphQlConnectionConfig.From({ ...GqlPagingConfig, pageFirstArg: "bad name" }), /not a valid identifier/);
+});

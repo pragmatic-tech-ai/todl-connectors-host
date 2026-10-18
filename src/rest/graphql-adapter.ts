@@ -1,11 +1,60 @@
 import { ConnectionFailureKind, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalRecord, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
+import { JsonPath } from "./json-path.js";
 import { FetchFailureClassifier } from "./fetch-failure-classifier.js";
 import { RestHttpMethod } from "./rest-http-client.js";
 import type { IRestHttpClient, RestResponse } from "./rest-http-client.js";
 import { RestWriteReasons } from "./write-reasons.js";
+
+/** A nested GraphQL selection built from dot-path branches (leaf = a field list, or none for a scalar). */
+export class SelectionTree
+{
+    private static readonly Open = "{ ";
+    private static readonly Close = " }";
+    private static readonly Space = " ";
+    private readonly children = new Map<string, SelectionTree>();
+    private leaf: string | undefined;
+
+    public Add(branch: readonly string[], leaf: string | undefined): void
+    {
+        let node: SelectionTree = this;
+        for (const name of branch)
+        {
+            let next = node.children.get(name);
+            if (next === undefined)
+            {
+                next = new SelectionTree();
+                node.children.set(name, next);
+            }
+            node = next;
+        }
+        node.leaf = leaf;
+    }
+
+    public Render(): string
+    {
+        const parts: string[] = [];
+        for (const [name, node] of this.children)
+        {
+            const inner = node.children.size > 0 ? node.Render() : node.leaf;
+            parts.push(inner === undefined ? name : name + SelectionTree.Open + inner + SelectionTree.Close);
+        }
+        return parts.join(SelectionTree.Space);
+    }
+}
+
+/** Declared GraphQL paging: the size/cursor arg names plus where the items and next cursor live under data. */
+export interface GraphQlPaging
+{
+    readonly firstArg: string;
+    readonly afterArg: string;
+    /** Dot path under `data`, starting with the queryField, of the items array. */
+    readonly itemsPath: string;
+    /** Dot path under `data`, starting with the queryField, of the next cursor scalar. */
+    readonly nextTokenPath: string;
+}
 
 /** Parsed GraphQL connection. One adapter instance serves exactly one `source` via `queryField`. */
 export interface GraphQlConnection
@@ -24,6 +73,8 @@ export interface GraphQlConnection
     readonly deleteIdArg: string;
     readonly errorConflictCodes: readonly string[];
     readonly errorUnsupportedCodes: readonly string[];
+    /** Present only when the connection declares paging; gates the adapter's CanPage. */
+    readonly paging?: GraphQlPaging;
 }
 
 export class GraphQlConnectionConfig
@@ -40,6 +91,12 @@ export class GraphQlConnectionConfig
     private static readonly DeleteIdArgKey = "deleteIdArg";
     private static readonly ErrorConflictCodesKey = "errorConflictCodes";
     private static readonly ErrorUnsupportedCodesKey = "errorUnsupportedCodes";
+    private static readonly PageFirstArgKey = "pageFirstArg";
+    private static readonly PageAfterArgKey = "pageAfterArg";
+    private static readonly ItemsPathKey = "itemsPath";
+    private static readonly NextTokenPathKey = "nextTokenPath";
+    private static readonly PagingIncompleteMessage = "graphql paging config requires pageFirstArg, pageAfterArg, itemsPath and nextTokenPath";
+    private static readonly PagingPathMessage = "graphql paging paths must start with the queryField and be distinct, non-nested paths below it";
     private static readonly DefaultUpsertInputType = "JSON";
     private static readonly DefaultUpsertInputArg = "input";
     private static readonly DefaultDeleteIdType = "ID";
@@ -49,6 +106,7 @@ export class GraphQlConnectionConfig
     private static readonly MissingMessage = "graphql connector config requires endpoint, source and queryField";
     private static readonly ReturnFieldSeparator = /[\s,]+/;
     private static readonly CodeSeparator = ",";
+    private static readonly PathJoin = ".";
 
     public static From(config: Record<string, string>, secret?: string): GraphQlConnection
     {
@@ -78,6 +136,7 @@ export class GraphQlConnectionConfig
         const upsertReturn = upsertReturnParsed.length > 0 ? upsertReturnParsed : undefined;
         const errorConflictCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorConflictCodesKey]);
         const errorUnsupportedCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorUnsupportedCodesKey]);
+        const paging = GraphQlConnectionConfig.ParsePaging(config, queryField);
         return {
             endpoint, headers, source, queryField,
             upsertInputType, upsertInputArg, deleteIdType, deleteIdArg,
@@ -85,7 +144,39 @@ export class GraphQlConnectionConfig
             ...(upsert !== undefined ? { upsertMutation: GraphQlName.Validate(upsert) } : {}),
             ...(del !== undefined ? { deleteMutation: GraphQlName.Validate(del) } : {}),
             ...(upsertReturn !== undefined ? { upsertReturn } : {}),
+            ...(paging !== undefined ? { paging } : {}),
         };
+    }
+
+    /** No paging key = not configured; some-but-not-all keys, or paths outside the queryField, are config errors. */
+    private static ParsePaging(config: Record<string, string>, queryField: string): GraphQlPaging | undefined
+    {
+        const firstArg = config[GraphQlConnectionConfig.PageFirstArgKey];
+        const afterArg = config[GraphQlConnectionConfig.PageAfterArgKey];
+        const itemsPath = config[GraphQlConnectionConfig.ItemsPathKey];
+        const nextTokenPath = config[GraphQlConnectionConfig.NextTokenPathKey];
+        const present = [firstArg, afterArg, itemsPath, nextTokenPath].filter(v => v !== undefined).length;
+        if (present === 0) return undefined;
+        if (firstArg === undefined || afterArg === undefined || itemsPath === undefined || nextTokenPath === undefined)
+        {
+            throw new Error(GraphQlConnectionConfig.PagingIncompleteMessage);
+        }
+        const items = GraphQlConnectionConfig.PathBelow(itemsPath, queryField);
+        const token = GraphQlConnectionConfig.PathBelow(nextTokenPath, queryField);
+        const nested = items.join(GraphQlConnectionConfig.PathJoin).startsWith(token.join(GraphQlConnectionConfig.PathJoin))
+            || token.join(GraphQlConnectionConfig.PathJoin).startsWith(items.join(GraphQlConnectionConfig.PathJoin));
+        if (nested) throw new Error(GraphQlConnectionConfig.PagingPathMessage);
+        return {
+            firstArg: GraphQlName.Validate(firstArg), afterArg: GraphQlName.Validate(afterArg), itemsPath, nextTokenPath,
+        };
+    }
+
+    /** The path segments below the queryField (each a valid GraphQL name); throws when the path is not under it. */
+    public static PathBelow(path: string, queryField: string): string[]
+    {
+        const segments = JsonPath.Segments(path);
+        if (segments.length < 2 || segments[0] !== queryField) throw new Error(GraphQlConnectionConfig.PagingPathMessage);
+        return segments.slice(1).map(s => GraphQlName.Validate(s));
     }
 
     /** Splits a space-or-comma return list and validates each field as a GraphQL identifier (config-time error). */
@@ -147,6 +238,16 @@ export class GraphQlAdapter implements IDataSourceAdapter
     private static readonly UpsertSelectionOpen = "){ ";
     private static readonly UpsertSelectionClose = " } }";
     private static readonly DeleteArgsClose = ") }";
+    private static readonly PagingNotConfiguredMessage = "graphql paging is not configured for this connection";
+    private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
+    private static readonly PagedQueryOpen = "query($";
+    private static readonly FirstVarType = ": Int, $";
+    private static readonly AfterVarType = ": String){ ";
+    private static readonly PagedArgsOpen = "(";
+    private static readonly FirstArgBind = ": $";
+    private static readonly ArgSeparator = ", ";
+    private static readonly PagedArgsClose = "){ ";
+    private static readonly PagedClose = " } }";
     private static readonly QueryKey = "query";
     private static readonly VariablesKey = "variables";
 
@@ -166,6 +267,12 @@ export class GraphQlAdapter implements IDataSourceAdapter
         return FetchFailureClassifier.Classify(error);
     }
 
+    /** Whether this adapter can page: true ONLY when the connection declares paging config (GraphQL has no generic id column). */
+    public get CanPage(): boolean
+    {
+        return this.connection.paging !== undefined;
+    }
+
     /** Whether this adapter can run a batch inside a backend transaction: no, each mutation is its own request. */
     public get CanTransact(): boolean
     {
@@ -183,6 +290,30 @@ export class GraphQlAdapter implements IDataSourceAdapter
         const list = data?.[this.connection.queryField];
         const records = Array.isArray(list) ? list as Record<string, unknown>[] : [];
         return ExternalQuery.Apply(records, request);
+    }
+
+    /**
+     * Declared-config page: sends first/after as variables to the query field, reads the records from
+     * itemsPath and the next cursor from nextTokenPath (both under `data`). NextAfter is set only when
+     * the cursor is a non-empty scalar. Where is re-applied to the page in-adapter.
+     */
+    public async QueryPage(request: QueryRequest, page: PageQuery): Promise<PageSlice>
+    {
+        const paging = this.connection.paging;
+        if (paging === undefined) throw new Error(GraphQlAdapter.PagingNotConfiguredMessage);
+        if (!Number.isInteger(page.Limit) || page.Limit <= 0) throw new Error(GraphQlAdapter.InvalidLimitMessage);
+        if (request.Source !== this.connection.source) return { Records: [] };
+        const variables: Record<string, unknown> = { [paging.firstArg]: page.Limit };
+        if (page.After !== undefined) variables[paging.afterArg] = page.After;
+        const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
+            { [GraphQlAdapter.QueryKey]: this.PagedDocument(paging, GraphQlAdapter.Selection(request)), [GraphQlAdapter.VariablesKey]: variables });
+        GraphQlAdapter.EnsureOk(response);
+        const data = (response.Body as Record<string, unknown> | undefined)?.[GraphQlAdapter.DataKey];
+        const items = JsonPath.Read(data, paging.itemsPath);
+        const records = Array.isArray(items) ? items as Record<string, unknown>[] : [];
+        const next = JsonPath.AsToken(JsonPath.Read(data, paging.nextTokenPath));
+        const applied = ExternalQuery.Apply(records, request);
+        return next === undefined ? { Records: applied } : { Records: applied, NextAfter: next as ExternalFieldValue };
     }
 
     /**
@@ -305,6 +436,19 @@ export class GraphQlAdapter implements IDataSourceAdapter
         return GraphQlAdapter.MutationVarOpen + arg + GraphQlAdapter.VarTypeSeparator + this.connection.deleteIdType
             + GraphQlAdapter.RequiredSelectionOpen + mutation + GraphQlAdapter.ArgOpen + arg + GraphQlAdapter.ArgVarSeparator + arg
             + GraphQlAdapter.DeleteArgsClose;
+    }
+
+    /** Builds the paged document: the items branch ends in the field selection, the cursor branch in a scalar. */
+    private PagedDocument(paging: GraphQlPaging, fields: readonly string[]): string
+    {
+        const field = GraphQlName.Validate(this.connection.queryField);
+        const tree = new SelectionTree();
+        tree.Add(GraphQlConnectionConfig.PathBelow(paging.itemsPath, field), fields.map(f => GraphQlName.Validate(f)).join(GraphQlAdapter.FieldSeparator));
+        tree.Add(GraphQlConnectionConfig.PathBelow(paging.nextTokenPath, field), undefined);
+        return GraphQlAdapter.PagedQueryOpen + paging.firstArg + GraphQlAdapter.FirstVarType + paging.afterArg + GraphQlAdapter.AfterVarType
+            + field + GraphQlAdapter.PagedArgsOpen + paging.firstArg + GraphQlAdapter.FirstArgBind + paging.firstArg
+            + GraphQlAdapter.ArgSeparator + paging.afterArg + GraphQlAdapter.FirstArgBind + paging.afterArg + GraphQlAdapter.PagedArgsClose
+            + tree.Render() + GraphQlAdapter.PagedClose;
     }
 
     private QueryDocument(fields: readonly string[]): string

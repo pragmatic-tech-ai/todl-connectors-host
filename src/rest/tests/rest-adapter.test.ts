@@ -256,3 +256,97 @@ test("RestAdapter.ClassifyFailure delegates to the fetch classifier", () =>
     assert.equal(adapter.ClassifyFailure({ status: 401 }), ConnectionFailureKind.Auth);
     assert.equal(adapter.ClassifyFailure({ status: 404 }), ConnectionFailureKind.Permanent);
 });
+
+/** Records every paged GET url and replays a programmed envelope (+ optional Link header). */
+class PagedRestHttpClient extends FakeRestHttpClient
+{
+    public readonly Urls: string[] = [];
+
+    public constructor(baseUrl: string, private readonly body: unknown, private readonly link?: string)
+    {
+        super(baseUrl);
+    }
+
+    public async GetPage(url: string, _headers: Record<string, string>): Promise<{ Body: unknown; Link?: string }>
+    {
+        this.Urls.push(url);
+        return { Body: this.body, ...(this.link !== undefined ? { Link: this.link } : {}) };
+    }
+}
+
+const PagingConfig = { baseUrl: BaseUrl, pageLimitParam: "limit", pageAfterParam: "after", itemsPath: "data.items", nextTokenPath: "meta.next" };
+const PageRequest = { Source: Customer, Fields: ["id", "label"] };
+
+test("CanPage is false without paging config and QueryPage throws a clear error", async () =>
+{
+    const adapter = new RestAdapter(new PagedRestHttpClient(BaseUrl, {}), RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    assert.equal(adapter.CanPage, false);
+    await assert.rejects(adapter.QueryPage(PageRequest, { Limit: 2 }), /paging is not configured/);
+});
+
+test("CanPage is true with complete paging config", () =>
+{
+    const adapter = new RestAdapter(new PagedRestHttpClient(BaseUrl, {}), RestConnectionConfig.From(PagingConfig));
+    assert.equal(adapter.CanPage, true);
+});
+
+test("QueryPage sends limit + after params, reads items from itemsPath and the token from nextTokenPath", async () =>
+{
+    const body = { data: { items: [{ id: "a", label: "A" }, { id: "b", label: "B" }] }, meta: { next: "tok2" } };
+    const client = new PagedRestHttpClient(BaseUrl, body);
+    const adapter = new RestAdapter(client, RestConnectionConfig.From(PagingConfig));
+    const slice = await adapter.QueryPage(PageRequest, { Limit: 2, After: "tok1" });
+    assert.equal(client.Urls[0], `${BaseUrl}/Customer?limit=2&after=tok1`);
+    assert.deepEqual(slice.Records, [{ id: "a", label: "A" }, { id: "b", label: "B" }]);
+    assert.equal(slice.NextAfter, "tok2");
+});
+
+test("QueryPage omits the token param on the first page and leaves NextAfter undefined with no next token", async () =>
+{
+    const client = new PagedRestHttpClient(BaseUrl, { data: { items: [{ id: "a", label: "A" }] }, meta: { next: null } });
+    const adapter = new RestAdapter(client, RestConnectionConfig.From(PagingConfig));
+    const slice = await adapter.QueryPage(PageRequest, { Limit: 5 });
+    assert.equal(client.Urls[0], `${BaseUrl}/Customer?limit=5`);
+    assert.equal(slice.NextAfter, undefined);
+    assert.equal(slice.Records.length, 1);
+});
+
+test("QueryPage with pageTokenParam threads the opaque token through that param", async () =>
+{
+    const client = new PagedRestHttpClient(BaseUrl, { data: { items: [] }, meta: {} });
+    const { pageAfterParam: _omit, ...rest } = PagingConfig;
+    const adapter = new RestAdapter(client, RestConnectionConfig.From({ ...rest, pageTokenParam: "page_token" }));
+    await adapter.QueryPage(PageRequest, { Limit: 3, After: "abc" });
+    assert.equal(client.Urls[0], `${BaseUrl}/Customer?limit=3&page_token=abc`);
+});
+
+test("QueryPage with linkHeader reads the next token from the Link rel=next URL", async () =>
+{
+    const link = `<${BaseUrl}/Customer?limit=2&after=nxt9>; rel="next", <${BaseUrl}/Customer?limit=2>; rel="first"`;
+    const client = new PagedRestHttpClient(BaseUrl, { data: { items: [{ id: "a", label: "A" }] } }, link);
+    const config = { baseUrl: BaseUrl, pageLimitParam: "limit", pageAfterParam: "after", itemsPath: "data.items", linkHeader: "true" };
+    const adapter = new RestAdapter(client, RestConnectionConfig.From(config));
+    assert.equal((await adapter.QueryPage(PageRequest, { Limit: 2 })).NextAfter, "nxt9");
+    const none = new RestAdapter(new PagedRestHttpClient(BaseUrl, { data: { items: [] } }, `<${BaseUrl}/x?after=1>; rel="prev"`), RestConnectionConfig.From(config));
+    assert.equal((await none.QueryPage(PageRequest, { Limit: 2 })).NextAfter, undefined);
+});
+
+test("QueryPage rejects a non-positive-integer Limit", async () =>
+{
+    const adapter = new RestAdapter(new PagedRestHttpClient(BaseUrl, {}), RestConnectionConfig.From(PagingConfig));
+    await assert.rejects(adapter.QueryPage(PageRequest, { Limit: 0 }), /positive integer/);
+    await assert.rejects(adapter.QueryPage(PageRequest, { Limit: 1.5 }), /positive integer/);
+});
+
+test("QueryPage throws when itemsPath does not resolve to an array", async () =>
+{
+    const adapter = new RestAdapter(new PagedRestHttpClient(BaseUrl, { data: { items: "nope" } }), RestConnectionConfig.From(PagingConfig));
+    await assert.rejects(adapter.QueryPage(PageRequest, { Limit: 2 }), /non-array payload at itemsPath/);
+});
+
+test("partial or contradictory paging config is a clear config error", () =>
+{
+    assert.throws(() => RestConnectionConfig.From({ baseUrl: BaseUrl, pageLimitParam: "limit" }), /rest paging config requires/);
+    assert.throws(() => RestConnectionConfig.From({ ...PagingConfig, pageTokenParam: "t" }), /rest paging config requires/);
+    assert.throws(() => RestConnectionConfig.From({ ...PagingConfig, linkHeader: "true" }), /rest paging config requires/);
+});
