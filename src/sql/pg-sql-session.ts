@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { ConnectionFailureKind } from "@pragmatic-tech-ai/todl";
 import type { ISqlSession, SqlRow } from "@pragmatic-tech-ai/todl";
 
 /** The minimal driver surface a {@link PgSessionBase} issues statements through: a `pg` Pool and a
@@ -14,6 +15,12 @@ abstract class PgSessionBase implements ISqlSession
 {
     /** Postgres SQLSTATE undefined_table, set as `error.code` by real pg. */
     protected static readonly UndefinedTableCode = "42P01";
+    /** SQLSTATE class 08 (connection exception): the link dropped or could not be made; retry. */
+    private static readonly ConnectionClass = "08";
+    /** SQLSTATE class 28 (invalid authorization specification): credentials rejected; reopen with fresh ones. */
+    private static readonly AuthClass = "28";
+    /** admin_shutdown / crash_shutdown / cannot_connect_now: the server is going away or starting; retry. */
+    private static readonly ShutdownCodes: ReadonlySet<string> = new Set(["57P01", "57P02", "57P03"]);
     /**
      * pg-mem sets NO `code` for a missing relation: it throws a RelationNotFound error whose message is
      * `relation "<name>" does not exist`. Real Postgres uses the same message wording.
@@ -48,6 +55,35 @@ abstract class PgSessionBase implements ISqlSession
     {
         const result = await this.queryable.query(sql, params as unknown[]);
         return result.rowCount ?? 0;
+    }
+
+    /** Pure function of the error: classifies a pg SQLSTATE; never reads the message or any secret. */
+    public ClassifyFailure(error: unknown): ConnectionFailureKind
+    {
+        const code = PgSessionBase.CodeOf(error);
+        if (code === undefined)
+        {
+            return ConnectionFailureKind.Permanent;
+        }
+        if (code.startsWith(PgSessionBase.ConnectionClass) || PgSessionBase.ShutdownCodes.has(code))
+        {
+            return ConnectionFailureKind.Transient;
+        }
+        if (code.startsWith(PgSessionBase.AuthClass))
+        {
+            return ConnectionFailureKind.Auth;
+        }
+        return ConnectionFailureKind.Permanent;
+    }
+
+    private static CodeOf(error: unknown): string | undefined
+    {
+        const e = error as { code?: unknown } | null;
+        if (e === null || typeof e !== "object")
+        {
+            return undefined;
+        }
+        return typeof e.code === "string" ? e.code : undefined;
     }
 
     protected static IsUndefinedTable(error: unknown): boolean

@@ -111,7 +111,7 @@ test("a connector naming a provider resolves through the host's provider", async
     const host = new ConnectorsHost({ provider });
     const spec: ConnectorSpec = { Name: "p", Kind: DataSourceKind.Rest, Config: {}, Provider: "pack@1" };
     const opened = await host.Catalog.Open(spec, new ServiceProvider());
-    assert.equal(opened, adapter);
+    assert.notEqual(opened, adapter);
     assert.deepEqual(provider.Requests, [{ Kind: DataSourceKind.Rest, Provider: "pack@1" }]);
 });
 

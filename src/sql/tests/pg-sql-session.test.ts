@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PgSqlSession } from "../pg-sql-session.js";
 import { Pool } from "pg";
+import { ConnectionFailureKind } from "@pragmatic-tech-ai/todl";
 
 class FakePool
 {
@@ -176,6 +177,39 @@ test("Transaction issues ROLLBACK and rethrows when work throws, still releasing
     }), /boom/);
     assert.deepEqual(client.queries, ["BEGIN", TxUpdateSql, "ROLLBACK"]);
     assert.equal(client.released, 1);
+});
+
+const ClassificationTable: readonly [string | undefined, ConnectionFailureKind][] =
+[
+    ["08000", ConnectionFailureKind.Transient],
+    ["08003", ConnectionFailureKind.Transient],
+    ["08006", ConnectionFailureKind.Transient],
+    ["08001", ConnectionFailureKind.Transient],
+    ["08004", ConnectionFailureKind.Transient],
+    ["57P01", ConnectionFailureKind.Transient],
+    ["57P02", ConnectionFailureKind.Transient],
+    ["57P03", ConnectionFailureKind.Transient],
+    ["28000", ConnectionFailureKind.Auth],
+    ["28P01", ConnectionFailureKind.Auth],
+    ["23505", ConnectionFailureKind.Permanent],
+    ["42P01", ConnectionFailureKind.Permanent],
+    [undefined, ConnectionFailureKind.Permanent],
+];
+
+for (const [code, kind] of ClassificationTable)
+{
+    test(`ClassifyFailure maps SQLSTATE ${code ?? "(none)"} to ${kind}`, () =>
+    {
+        const session = new PgSqlSession(new FakePool({ rows: [], rowCount: 0 }, () => { }).AsPool());
+        assert.equal(session.ClassifyFailure(code === undefined ? new Error("x") : { code }), kind);
+    });
+}
+
+test("ClassifyFailure is Permanent for non-object errors", () =>
+{
+    const session = new PgSqlSession(new FakePool({ rows: [], rowCount: 0 }, () => { }).AsPool());
+    assert.equal(session.ClassifyFailure(null), ConnectionFailureKind.Permanent);
+    assert.equal(session.ClassifyFailure("08000"), ConnectionFailureKind.Permanent);
 });
 
 // GATED LIVE: a real Postgres honours the pinned-client transaction -- COMMIT persists, ROLLBACK
