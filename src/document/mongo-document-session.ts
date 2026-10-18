@@ -49,6 +49,8 @@ export class DocumentConnectionConfig
 export class MongoDocumentSession implements IDocumentSession
 {
     private static readonly GreaterThanOperator = "$gt";
+    private static readonly AndOperator = "$and";
+    private static readonly ProjectionExcludeId = { _id: 0 } as const;
     private static readonly AuthMissingUserMessage = "mongo auth requires a 'user' config key when a secret is supplied";
 
     public constructor(
@@ -90,7 +92,7 @@ export class MongoDocumentSession implements IDocumentSession
         DocumentIdentifier.Validate(collection);
         const effective = this.EffectiveFilter(filter, options);
         let cursor = this.client.db(this.database).collection(collection)
-            .find(effective, { projection: MongoDocumentSession.Projection(), ...this.SessionOption() });
+            .find(effective, { projection: MongoDocumentSession.ProjectionExcludeId, ...this.SessionOption() });
         if (options?.Sort !== undefined)
         {
             cursor = cursor.sort(options.Sort);
@@ -110,12 +112,8 @@ export class MongoDocumentSession implements IDocumentSession
             return filter;
         }
         const field = DocumentIdentifier.Validate(options.After.Field);
-        return { ...filter, [field]: { [MongoDocumentSession.GreaterThanOperator]: options.After.Value } };
-    }
-
-    private static Projection(): { _id: 0 }
-    {
-        return { _id: 0 };
+        const seek = { [field]: { [MongoDocumentSession.GreaterThanOperator]: options.After.Value } };
+        return Object.keys(filter).length === 0 ? seek : { [MongoDocumentSession.AndOperator]: [filter, seek] };
     }
 
     public async Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>

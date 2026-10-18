@@ -8,7 +8,8 @@ import type { IDocumentSession } from "./document-session.js";
 /** Document adapter: Find to read (Where re-applied in-adapter), Upsert/Delete to write. */
 export class DocumentAdapter implements IDataSourceAdapter
 {
-    private static readonly GreaterThanOperator = "$gt";
+    private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
+    private static readonly MissingOrderKeyMessage = "QueryPage requires request.OrderKey or at least one field to order by";
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly AtomicUnsupportedReason = "atomic write not supported by this connector";
 
@@ -76,17 +77,24 @@ export class DocumentAdapter implements IDataSourceAdapter
     public async QueryPage(request: QueryRequest, page: PageQuery): Promise<PageSlice>
     {
         DocumentIdentifier.Validate(request.Source);
-        const orderKey = DocumentIdentifier.Validate(request.OrderKey ?? request.Fields[0]!);
-        const base = MongoFilter.From(request.Where?.All ?? []);
-        // The keyset term is merged here too so any session (even one ignoring options) receives the seek; the merge is idempotent.
-        const filter = page.After === undefined ? base : { ...base, [orderKey]: { [DocumentAdapter.GreaterThanOperator]: page.After } };
+        if (!Number.isInteger(page.Limit) || page.Limit <= 0)
+        {
+            throw new Error(DocumentAdapter.InvalidLimitMessage);
+        }
+        const rawKey = request.OrderKey ?? request.Fields[0];
+        if (rawKey === undefined)
+        {
+            throw new Error(DocumentAdapter.MissingOrderKeyMessage);
+        }
+        const orderKey = DocumentIdentifier.Validate(rawKey);
+        const filter = MongoFilter.From(request.Where?.All ?? []);
         const docs = await this.session.Find(request.Source, filter, {
             Sort: { [orderKey]: 1 },
             After: page.After === undefined ? undefined : { Field: orderKey, Value: page.After },
             Limit: page.Limit,
         });
         const records = ExternalQuery.Apply(docs, request);
-        const lastKey = docs.length === page.Limit && page.Limit > 0 ? docs[docs.length - 1]![orderKey] : undefined;
+        const lastKey = docs.length === page.Limit ? docs[docs.length - 1]![orderKey] : undefined;
         if (lastKey == null)
         {
             return { Records: records };

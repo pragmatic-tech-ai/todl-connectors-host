@@ -61,3 +61,50 @@ for (const row of MongoClassifyCases.Rows)
         assert.equal(adapter.ClassifyFailure(row.Error), row.Kind);
     });
 }
+
+type RecordedCursor = { Filter?: unknown; FindOptions?: unknown; Sort?: unknown; Limit?: unknown };
+
+class StubMongoFixture
+{
+    public static readonly Collection = "Customer";
+    public static readonly Key = "id";
+    public static readonly After = "k5";
+    public static readonly Tier = "tier";
+    public static readonly Gold = "gold";
+
+    public static Make(): { Rec: RecordedCursor; Session: MongoDocumentSession }
+    {
+        const rec: RecordedCursor = {};
+        const cursor = {
+            sort: (s: unknown) => { rec.Sort = s; return cursor; },
+            limit: (l: unknown) => { rec.Limit = l; return cursor; },
+            toArray: async () => [],
+        };
+        const client = { db: () => ({ collection: () => ({ find: (f: unknown, o: unknown) => { rec.Filter = f; rec.FindOptions = o; return cursor; } }) }) };
+        return { Rec: rec, Session: new MongoDocumentSession(client as never, "db") };
+    }
+}
+
+test("paged Find ANDs the base filter with a strict $gt seek, sorts, limits and projects out _id", async () =>
+{
+    const { Rec, Session } = StubMongoFixture.Make();
+    await Session.Find(StubMongoFixture.Collection, { [StubMongoFixture.Tier]: StubMongoFixture.Gold },
+        { Sort: { [StubMongoFixture.Key]: 1 }, After: { Field: StubMongoFixture.Key, Value: StubMongoFixture.After }, Limit: 2 });
+    assert.deepEqual(Rec.Filter, { $and: [{ [StubMongoFixture.Tier]: StubMongoFixture.Gold }, { [StubMongoFixture.Key]: { $gt: StubMongoFixture.After } }] });
+    assert.deepEqual(Rec.Sort, { [StubMongoFixture.Key]: 1 });
+    assert.equal(Rec.Limit, 2);
+    assert.deepEqual(Rec.FindOptions, { projection: { _id: 0 } });
+});
+
+test("paged Find with an empty base filter uses the bare seek; the no-options path is unchanged", async () =>
+{
+    const first = StubMongoFixture.Make();
+    await first.Session.Find(StubMongoFixture.Collection, {}, { After: { Field: StubMongoFixture.Key, Value: StubMongoFixture.After } });
+    assert.deepEqual(first.Rec.Filter, { [StubMongoFixture.Key]: { $gt: StubMongoFixture.After } });
+    const plain = StubMongoFixture.Make();
+    await plain.Session.Find(StubMongoFixture.Collection, { [StubMongoFixture.Tier]: StubMongoFixture.Gold });
+    assert.deepEqual(plain.Rec.Filter, { [StubMongoFixture.Tier]: StubMongoFixture.Gold });
+    assert.equal(plain.Rec.Sort, undefined);
+    assert.equal(plain.Rec.Limit, undefined);
+    assert.deepEqual(plain.Rec.FindOptions, { projection: { _id: 0 } });
+});
