@@ -142,6 +142,7 @@ test("a version-guarded upsert of a new key proceeds", async () =>
     assert.equal(result.Failures.length, 0);
 });
 
+/** The recording fake only proves the emitted Cypher + params (it does not sort/limit/seek/filter); behavior is proven by the pushed-down Cypher. */
 class CypherPagingFixture
 {
     public static readonly Key = "id";
@@ -200,7 +201,7 @@ test("QueryPage short slice has no NextAfter; full slice with a null last key ha
 {
     const short = CypherPagingFixture.Make([{ id: "k6" }]);
     assert.equal((await short.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["id"] }, { Limit: 2 })).NextAfter, undefined);
-    const nul = CypherPagingFixture.Make([{ id: "k6" }]);
+    const nul = CypherPagingFixture.Make([]);
     nul.Session.Seed(CypherFixture.Customer, [{ id: "k6" }, { id: "k7", rank: null }]);
     const slice = await nul.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["rank"], OrderKey: "rank" }, { Limit: 2 });
     assert.equal(slice.NextAfter, undefined);

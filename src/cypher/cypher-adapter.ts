@@ -110,8 +110,12 @@ export class CypherAdapter implements IDataSourceAdapter
 
     /**
      * Keyset page: MATCH with the Where terms and a strict `n.key > $after` seek ANDed, ordered ascending on
-     * the key and limited to page.Limit at the source. Where is still re-applied in-adapter (existing
-     * contract). NextAfter is the last fetched node's key, only when a full page came back.
+     * the key and limited to page.Limit at the source. Where is trusted to the source (not re-applied in
+     * memory). NextAfter is the last fetched node's key, only when a full page came back.
+     *
+     * The order key MUST be unique and non-null for keyset paging: a non-unique key skips duplicates at
+     * page boundaries; a null/missing key is dropped after page 1 (`>` excludes null) and a null last key
+     * ends paging.
      */
     public async QueryPage(request: QueryRequest, page: PageQuery): Promise<PageSlice>
     {
@@ -131,7 +135,7 @@ export class CypherAdapter implements IDataSourceAdapter
         const terms: string[] = [];
         if (page.After !== undefined)
         {
-            terms.push(`${keyRef} ${CypherAdapter.GreaterOp} ${CypherAdapter.ParamPrefix}${CypherAdapter.AfterParam}`);
+            terms.push([keyRef, CypherAdapter.GreaterOp, `${CypherAdapter.ParamPrefix}${CypherAdapter.AfterParam}`].join(CypherAdapter.Space));
             params[CypherAdapter.AfterParam] = page.After;
         }
         (request.Where?.All ?? []).forEach((c, i) =>
@@ -151,7 +155,8 @@ export class CypherAdapter implements IDataSourceAdapter
             `${CypherAdapter.ToIntegerFn}${CypherAdapter.OpenParen}${CypherAdapter.ParamPrefix}${CypherAdapter.LimitParam}${CypherAdapter.CloseParen}`);
         const rows = await this.session.Run(parts.join(CypherAdapter.Space), params);
         const raw = rows.map(r => (r[CypherAdapter.PropsAlias] ?? {}) as Record<string, unknown>);
-        const records = ExternalQuery.Apply(raw, request);
+        // Where is already enforced at the source; project only (no in-memory re-filter, which could drop source-matched rows).
+        const records = ExternalQuery.Apply(raw, { ...request, Where: undefined });
         const lastKey = raw.length === page.Limit ? raw[raw.length - 1]![rawKey] : undefined;
         if (lastKey == null)
         {
@@ -163,7 +168,7 @@ export class CypherAdapter implements IDataSourceAdapter
     private static WhereTerm(c: QueryComparison, param: string): string
     {
         const op = c.Op === QueryCompareOp.Neq ? CypherAdapter.NotEqualOp : CypherAdapter.EqualOp;
-        return `${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(c.Field)} ${op} ${CypherAdapter.ParamPrefix}${param}`;
+        return [`${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(c.Field)}`, op, `${CypherAdapter.ParamPrefix}${param}`].join(CypherAdapter.Space);
     }
 
     /** Dispatches on the batch's atomicity axis: resilient Sequential apply, or all-or-nothing Transactional. */
