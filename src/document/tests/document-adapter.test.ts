@@ -190,7 +190,6 @@ class PagingFixture
 {
     public static readonly Key = "id";
     public static readonly After = "k5";
-    public static readonly GtOperator = "$gt";
     public static readonly K6 = "k6";
     public static readonly K7 = "k7";
 
