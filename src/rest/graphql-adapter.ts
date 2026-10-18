@@ -69,8 +69,12 @@ export class GraphQlConnectionConfig
         const upsertInputArg = GraphQlName.Validate(config[GraphQlConnectionConfig.UpsertInputArgKey] ?? GraphQlConnectionConfig.DefaultUpsertInputArg);
         const deleteIdType = GraphQlName.Validate(config[GraphQlConnectionConfig.DeleteIdTypeKey] ?? GraphQlConnectionConfig.DefaultDeleteIdType);
         const deleteIdArg = GraphQlName.Validate(config[GraphQlConnectionConfig.DeleteIdArgKey] ?? GraphQlConnectionConfig.DefaultDeleteIdArg);
+        // An unset OR empty-after-parse (whitespace/commas-only) upsertReturn is left undefined so the
+        // adapter coalesces to [IdKey]: a GraphQL selection set cannot be empty, and returning the id keeps
+        // return-id validation working.
         const upsertReturnRaw = config[GraphQlConnectionConfig.UpsertReturnKey];
-        const upsertReturn = upsertReturnRaw !== undefined ? GraphQlConnectionConfig.ParseReturnFields(upsertReturnRaw) : undefined;
+        const upsertReturnParsed = upsertReturnRaw !== undefined ? GraphQlConnectionConfig.ParseReturnFields(upsertReturnRaw) : [];
+        const upsertReturn = upsertReturnParsed.length > 0 ? upsertReturnParsed : undefined;
         const errorConflictCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorConflictCodesKey]);
         const errorUnsupportedCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorUnsupportedCodesKey]);
         return {

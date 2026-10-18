@@ -199,6 +199,26 @@ test("upsert defaults reproduce today's JSON! document", async () =>
     assert.deepEqual(client.Sent.at(-1)!.Variables, { input: { label: "x", id: "c1" } });
 });
 
+test("an empty or whitespace-only upsertReturn behaves exactly like the default", async () =>
+{
+    for (const empty of ["", "  , ,"])
+    {
+        const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(), upsertReturn: empty });
+        const result = await adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+            [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+        assert.equal(result.Applied, 1, `applied for upsertReturn=${JSON.stringify(empty)}`);
+        assert.equal(client.Sent.at(-1)!.Query, "mutation($input: JSON!){ upsertCustomer(input: $input){ id } }");
+    }
+    // Still validates the returned id against the written key (the fallback selects IdKey back).
+    const mismatch = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(), upsertReturn: "" });
+    mismatch.client.Inject("c1", { ReturnId: "cZ" });
+    const mismatchResult = await mismatch.adapter.Apply(GraphQlAdapterFixture.LastWriteWins(
+        [{ Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } }]));
+    assert.equal(mismatchResult.Applied, 0);
+    assert.equal(mismatchResult.Failures[0]!.Kind, WriteFailureKind.Error);
+    assert.match(mismatchResult.Failures[0]!.Reason, /different id/);
+});
+
 test("delete emits the configured id type and arg", async () =>
 {
     const { adapter, client } = GraphQlAdapterFixture.Build({ ...GraphQlAdapterFixture.ConfigFull(),
