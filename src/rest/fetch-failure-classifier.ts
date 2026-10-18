@@ -16,6 +16,9 @@ export class FetchFailureClassifier
             return ConnectionFailureKind.Permanent;
         }
         const e = error as { name?: unknown; status?: unknown; message?: unknown };
+        // fetch signals a network-level failure by throwing a TypeError, so Transient is correct for the
+        // fetch path; a stray programming TypeError would at worst cost a bounded retry (capped by
+        // MaxAttempts), never a storm.
         if (error instanceof TypeError || (typeof e.name === "string" && FetchFailureClassifier.NetworkErrorNames.has(e.name)))
         {
             return ConnectionFailureKind.Transient;
