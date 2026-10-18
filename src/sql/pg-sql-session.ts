@@ -57,7 +57,7 @@ abstract class PgSessionBase implements ISqlSession
         return result.rowCount ?? 0;
     }
 
-    /** Pure function of the error: classifies a pg SQLSTATE; never reads the message or any secret. */
+    /** Depends only on error.code: classifies a pg SQLSTATE; never reads the message or any secret. */
     public ClassifyFailure(error: unknown): ConnectionFailureKind
     {
         const code = PgSessionBase.CodeOf(error);
