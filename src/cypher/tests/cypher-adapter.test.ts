@@ -216,3 +216,23 @@ test("QueryPage defaults the order key to the first field and rejects bad limits
     await assert.rejects(t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: ["id"] }, { Limit: 1.5 }), /positive integer/);
     await assert.rejects(t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: [] }, { Limit: 1 }), /order/);
 });
+
+test("rich filter operators push to the source (Query re-applies them; QueryPage trusts them)", async () =>
+{
+    const t = CypherPagingFixture.Make([{ id: "k1", n: 3, region: "eu" }, { id: "k2", n: 9, region: "us" }, { id: "k3", n: 4, region: "eu", gone: "x" }]);
+    const request: QueryRequest = {
+        Source: CypherFixture.Customer, Fields: ["id"], OrderKey: "id",
+        Where: { All: [
+            { Field: "n", Op: QueryCompareOp.Gte, Value: 3 },
+            { Field: "n", Op: QueryCompareOp.Lt, Value: 9 },
+            { Field: "region", Op: QueryCompareOp.In, Value: null, Values: ["eu", "apac"] },
+            { Field: "gone", Op: QueryCompareOp.IsNull, Value: null },
+        ] },
+    };
+    const records = await t.Adapter.Query(request);
+    assert.equal(t.Session.Statements[0]!.cypher, "MATCH (n:`Customer`) WHERE n.`n` >= $w0 AND n.`n` < $w1 AND n.`region` IN $w2 AND n.`gone` IS NULL RETURN properties(n) AS props");
+    assert.deepEqual(t.Session.Statements[0]!.params, { w0: 3, w1: 9, w2: ["eu", "apac"] });
+    assert.deepEqual(records, [{ id: "k1" }]);
+    await t.Adapter.QueryPage({ ...request, Where: { All: [{ Field: "gone", Op: QueryCompareOp.IsNotNull, Value: null }] } }, { Limit: 5 });
+    assert.equal(t.Session.Statements[1]!.cypher, "MATCH (n:`Customer`) WHERE n.`gone` IS NOT NULL RETURN properties(n) AS props ORDER BY n.`id` LIMIT toInteger($limit)");
+});

@@ -1,4 +1,5 @@
 import { ConnectionFailureKind, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
+import { DeclaredFilters, type PushedFilter } from "./declared-filters.js";
 import type { ExternalFieldValue, ExternalRecord, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
@@ -75,6 +76,8 @@ export interface GraphQlConnection
     readonly errorUnsupportedCodes: readonly string[];
     /** Present only when the connection declares paging; gates the adapter's CanPage. */
     readonly paging?: GraphQlPaging;
+    /** Declared query-field equality arguments (`filterArgs`); absent when undeclared. */
+    readonly filters?: DeclaredFilters;
 }
 
 export class GraphQlConnectionConfig
@@ -95,6 +98,7 @@ export class GraphQlConnectionConfig
     private static readonly PageAfterArgKey = "pageAfterArg";
     private static readonly ItemsPathKey = "itemsPath";
     private static readonly NextTokenPathKey = "nextTokenPath";
+    private static readonly FilterArgsKey = "filterArgs";
     private static readonly PagingIncompleteMessage = "graphql paging config requires pageFirstArg, pageAfterArg, itemsPath and nextTokenPath";
     private static readonly PagingPathMessage = "graphql paging paths must start with the queryField and be distinct, non-nested paths below it";
     private static readonly DefaultUpsertInputType = "JSON";
@@ -136,6 +140,7 @@ export class GraphQlConnectionConfig
         const errorConflictCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorConflictCodesKey]);
         const errorUnsupportedCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorUnsupportedCodesKey]);
         const paging = GraphQlConnectionConfig.ParsePaging(config, queryField);
+        const filters = DeclaredFilters.Parse(config[GraphQlConnectionConfig.FilterArgsKey], true);
         return {
             endpoint, headers, source, queryField,
             upsertInputType, upsertInputArg, deleteIdType, deleteIdArg,
@@ -144,6 +149,7 @@ export class GraphQlConnectionConfig
             ...(del !== undefined ? { deleteMutation: GraphQlName.Validate(del) } : {}),
             ...(upsertReturn !== undefined ? { upsertReturn } : {}),
             ...(paging !== undefined ? { paging } : {}),
+            ...(filters.IsEmpty ? {} : { filters }),
         };
     }
 
@@ -253,6 +259,11 @@ export class GraphQlAdapter implements IDataSourceAdapter
     private static readonly PagedArgsClose = "){ ";
     private static readonly PagedClose = " } }";
     private static readonly QueryKey = "query";
+    private static readonly FilterVarPrefix = "f";
+    private static readonly VarSigil = "$";
+    private static readonly FilteredQueryOpen = "query($";
+    private static readonly FilteredVarsClose = "){ ";
+    private static readonly FilteredArgsClose = ")";
     private static readonly VariablesKey = "variables";
 
     public constructor(private readonly client: IRestHttpClient, private readonly connection: GraphQlConnection)
@@ -286,9 +297,11 @@ export class GraphQlAdapter implements IDataSourceAdapter
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
         if (request.Source !== this.connection.source) return [];
-        const document = this.QueryDocument(GraphQlAdapter.Selection(request));
-        const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
-            { [GraphQlAdapter.QueryKey]: document });
+        const pushed = this.connection.filters?.Pick(request.Where) ?? [];
+        const document = this.QueryDocument(GraphQlAdapter.Selection(request), pushed);
+        const body: Record<string, unknown> = { [GraphQlAdapter.QueryKey]: document };
+        if (pushed.length > 0) body[GraphQlAdapter.VariablesKey] = GraphQlAdapter.FilterVariables(pushed);
+        const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers, body);
         GraphQlAdapter.EnsureOk(response);
         const data = (response.Body as Record<string, unknown> | undefined)?.[GraphQlAdapter.DataKey] as Record<string, unknown> | undefined;
         const list = data?.[this.connection.queryField];
@@ -307,10 +320,11 @@ export class GraphQlAdapter implements IDataSourceAdapter
         if (paging === undefined) throw new Error(GraphQlAdapter.PagingNotConfiguredMessage);
         if (!Number.isInteger(page.Limit) || page.Limit <= 0) throw new Error(GraphQlAdapter.InvalidLimitMessage);
         if (request.Source !== this.connection.source) return { Records: [] };
-        const variables: Record<string, unknown> = { [paging.firstArg]: page.Limit };
+        const pushed = this.connection.filters?.Pick(request.Where) ?? [];
+        const variables: Record<string, unknown> = { ...GraphQlAdapter.FilterVariables(pushed), [paging.firstArg]: page.Limit };
         if (page.After !== undefined) variables[paging.afterArg] = String(page.After);
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
-            { [GraphQlAdapter.QueryKey]: this.PagedDocument(paging, GraphQlAdapter.Selection(request)), [GraphQlAdapter.VariablesKey]: variables });
+            { [GraphQlAdapter.QueryKey]: this.PagedDocument(paging, GraphQlAdapter.Selection(request), pushed), [GraphQlAdapter.VariablesKey]: variables });
         GraphQlAdapter.EnsureOk(response);
         const data = (response.Body as Record<string, unknown> | undefined)?.[GraphQlAdapter.DataKey];
         const items = JsonPath.Read(data, paging.itemsPath);
@@ -444,22 +458,48 @@ export class GraphQlAdapter implements IDataSourceAdapter
     }
 
     /** Builds the paged document: the items branch ends in the field selection, the cursor branch in a scalar. */
-    private PagedDocument(paging: GraphQlPaging, fields: readonly string[]): string
+    private PagedDocument(paging: GraphQlPaging, fields: readonly string[], pushed: readonly PushedFilter[]): string
     {
         const field = GraphQlName.Validate(this.connection.queryField);
         const tree = new SelectionTree();
         tree.Add(GraphQlConnectionConfig.PathBelow(paging.itemsPath, field), fields.map(f => GraphQlName.Validate(f)).join(GraphQlAdapter.FieldSeparator));
         tree.Add(GraphQlConnectionConfig.PathBelow(paging.nextTokenPath, field), undefined);
-        return GraphQlAdapter.PagedQueryOpen + paging.firstArg + GraphQlAdapter.FirstVarType + paging.afterArg + GraphQlAdapter.AfterVarType
-            + field + GraphQlAdapter.PagedArgsOpen + paging.firstArg + GraphQlAdapter.FirstArgBind + paging.firstArg
+        return GraphQlAdapter.PagedQueryOpen + GraphQlAdapter.FilterVarDefs(pushed, true) + paging.firstArg + GraphQlAdapter.FirstVarType + paging.afterArg + GraphQlAdapter.AfterVarType
+            + field + GraphQlAdapter.PagedArgsOpen + GraphQlAdapter.FilterArgs(pushed, true) + paging.firstArg + GraphQlAdapter.FirstArgBind + paging.firstArg
             + GraphQlAdapter.ArgSeparator + paging.afterArg + GraphQlAdapter.FirstArgBind + paging.afterArg + GraphQlAdapter.PagedArgsClose
             + tree.Render() + GraphQlAdapter.PagedClose;
     }
 
-    private QueryDocument(fields: readonly string[]): string
+    private QueryDocument(fields: readonly string[], pushed: readonly PushedFilter[]): string
     {
-        return GraphQlAdapter.QueryPrefix + GraphQlName.Validate(this.connection.queryField) + GraphQlAdapter.SelectionOpen
-            + fields.map(f => GraphQlName.Validate(f)).join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.SelectionClose + GraphQlAdapter.SelectionClose;
+        const selection = GraphQlAdapter.SelectionOpen + fields.map(f => GraphQlName.Validate(f)).join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.SelectionClose;
+        const field = GraphQlName.Validate(this.connection.queryField);
+        if (pushed.length === 0) return GraphQlAdapter.QueryPrefix + field + selection + GraphQlAdapter.SelectionClose;
+        return GraphQlAdapter.FilteredQueryOpen + GraphQlAdapter.FilterVarDefs(pushed, false) + GraphQlAdapter.FilteredVarsClose
+            + field + GraphQlAdapter.ArgOpen + GraphQlAdapter.FilterArgs(pushed, false) + GraphQlAdapter.FilteredArgsClose + selection + GraphQlAdapter.SelectionClose;
+    }
+
+    // Declared filter variables are named f0, f1, ... (never colliding with the paging args, which are validated names).
+    private static FilterVariable(i: number): string
+    {
+        return GraphQlAdapter.FilterVarPrefix + i;
+    }
+
+    private static FilterVariables(pushed: readonly PushedFilter[]): Record<string, unknown>
+    {
+        return Object.fromEntries(pushed.map((p, i) => [GraphQlAdapter.FilterVariable(i), p.Value]));
+    }
+
+    private static FilterVarDefs(pushed: readonly PushedFilter[], trailing: boolean): string
+    {
+        const defs = pushed.map((p, i) => GraphQlAdapter.FilterVariable(i) + GraphQlAdapter.VarTypeSeparator + p.Filter.Type!);
+        return defs.join(GraphQlAdapter.ArgSeparator + GraphQlAdapter.VarSigil) + (trailing && defs.length > 0 ? GraphQlAdapter.ArgSeparator + GraphQlAdapter.VarSigil : "");
+    }
+
+    private static FilterArgs(pushed: readonly PushedFilter[], trailing: boolean): string
+    {
+        const args = pushed.map((p, i) => GraphQlName.Validate(p.Filter.Target) + GraphQlAdapter.FirstArgBind + GraphQlAdapter.FilterVariable(i));
+        return args.join(GraphQlAdapter.ArgSeparator) + (trailing && args.length > 0 ? GraphQlAdapter.ArgSeparator : "");
     }
 
     /** Union of projected fields and Where fields, deduped, so Where can be re-applied in-adapter. */

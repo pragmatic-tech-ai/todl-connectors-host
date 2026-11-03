@@ -45,6 +45,17 @@ export class CypherAdapter implements IDataSourceAdapter
     public static readonly GreaterOp = ">";
     public static readonly EqualOp = "=";
     public static readonly NotEqualOp = "<>";
+    public static readonly IsNullOp = "IS NULL";
+    public static readonly IsNotNullOp = "IS NOT NULL";
+    private static readonly Operators: ReadonlyMap<QueryCompareOp, string> = new Map([
+        [QueryCompareOp.Eq, "="],
+        [QueryCompareOp.Neq, "<>"],
+        [QueryCompareOp.Lt, "<"],
+        [QueryCompareOp.Lte, "<="],
+        [QueryCompareOp.Gt, ">"],
+        [QueryCompareOp.Gte, ">="],
+        [QueryCompareOp.In, "IN"],
+    ]);
     public static readonly ToIntegerFn = "toInteger";
     private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
     private static readonly MissingOrderKeyMessage = "QueryPage requires request.OrderKey or at least one field to order by";
@@ -100,11 +111,18 @@ export class CypherAdapter implements IDataSourceAdapter
     {
         const v = CypherAdapter.NodeVar;
         const label = CypherIdentifier.Quote(request.Source);
-        const cypher = [CypherAdapter.Match, `${CypherAdapter.OpenParen}${v}${CypherAdapter.Colon}${label}${CypherAdapter.CloseParen}`,
-            CypherAdapter.Return, `${CypherAdapter.PropertiesFn}${CypherAdapter.OpenParen}${v}${CypherAdapter.CloseParen}`,
-            CypherAdapter.AsKeyword, CypherAdapter.PropsAlias].join(CypherAdapter.Space);
-        const rows = await this.session.Run(cypher, {});
+        const params: Record<string, unknown> = {};
+        const terms = CypherAdapter.WhereTerms(request, params);
+        const parts = [CypherAdapter.Match, `${CypherAdapter.OpenParen}${v}${CypherAdapter.Colon}${label}${CypherAdapter.CloseParen}`];
+        if (terms.length > 0)
+        {
+            parts.push(CypherAdapter.Where, terms.join(`${CypherAdapter.Space}${CypherAdapter.And}${CypherAdapter.Space}`));
+        }
+        parts.push(CypherAdapter.Return, `${CypherAdapter.PropertiesFn}${CypherAdapter.OpenParen}${v}${CypherAdapter.CloseParen}`,
+            CypherAdapter.AsKeyword, CypherAdapter.PropsAlias);
+        const rows = await this.session.Run(parts.join(CypherAdapter.Space), params);
         const records = rows.map(r => (r[CypherAdapter.PropsAlias] ?? {}) as Record<string, unknown>);
+        // Pushed to narrow the pull; re-applied for the engine's exact semantics.
         return ExternalQuery.Apply(records, request);
     }
 
@@ -138,12 +156,7 @@ export class CypherAdapter implements IDataSourceAdapter
             terms.push([keyRef, CypherAdapter.GreaterOp, `${CypherAdapter.ParamPrefix}${CypherAdapter.AfterParam}`].join(CypherAdapter.Space));
             params[CypherAdapter.AfterParam] = page.After;
         }
-        (request.Where?.All ?? []).forEach((c, i) =>
-        {
-            const name = `${CypherAdapter.WhereParamPrefix}${i}`;
-            terms.push(CypherAdapter.WhereTerm(c, name));
-            params[name] = c.Value;
-        });
+        terms.push(...CypherAdapter.WhereTerms(request, params));
         params[CypherAdapter.LimitParam] = page.Limit;
         const parts = [CypherAdapter.Match, `${CypherAdapter.OpenParen}${v}${CypherAdapter.Colon}${label}${CypherAdapter.CloseParen}`];
         if (terms.length > 0)
@@ -165,10 +178,20 @@ export class CypherAdapter implements IDataSourceAdapter
         return { Records: records, NextAfter: lastKey as ExternalFieldValue };
     }
 
-    private static WhereTerm(c: QueryComparison, param: string): string
+    /** The Where terms as Cypher predicates over the node, binding operands into `params` (w0, w1, ...). */
+    private static WhereTerms(request: QueryRequest, params: Record<string, unknown>): string[]
     {
-        const op = c.Op === QueryCompareOp.Neq ? CypherAdapter.NotEqualOp : CypherAdapter.EqualOp;
-        return [`${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(c.Field)}`, op, `${CypherAdapter.ParamPrefix}${param}`].join(CypherAdapter.Space);
+        return (request.Where?.All ?? []).map((c, i) => CypherAdapter.WhereTerm(c, `${CypherAdapter.WhereParamPrefix}${i}`, params));
+    }
+
+    // Cypher's own NULL semantics match SQL's: a comparison with null is null (row excluded); IS NULL also matches missing.
+    private static WhereTerm(c: QueryComparison, param: string, params: Record<string, unknown>): string
+    {
+        const property = `${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(c.Field)}`;
+        if (c.Op === QueryCompareOp.IsNull) return [property, CypherAdapter.IsNullOp].join(CypherAdapter.Space);
+        if (c.Op === QueryCompareOp.IsNotNull) return [property, CypherAdapter.IsNotNullOp].join(CypherAdapter.Space);
+        params[param] = c.Op === QueryCompareOp.In ? [...(c.Values ?? [])] : c.Value;
+        return [property, CypherAdapter.Operators.get(c.Op) ?? CypherAdapter.EqualOp, `${CypherAdapter.ParamPrefix}${param}`].join(CypherAdapter.Space);
     }
 
     /** Dispatches on the batch's atomicity axis: resilient Sequential apply, or all-or-nothing Transactional. */
