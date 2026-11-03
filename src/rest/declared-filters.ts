@@ -65,6 +65,12 @@ export class DeclaredFilters
         return this.filters.length === 0;
     }
 
+    /** The declared argument for one source field, if any. */
+    public For(field: string): DeclaredFilter | undefined
+    {
+        return this.filters.find(f => f.Field === field);
+    }
+
     /** The declared filters this Where can drive: the first non-null Eq term per declared field. */
     public Pick(where: QueryFilter | undefined): PushedFilter[]
     {

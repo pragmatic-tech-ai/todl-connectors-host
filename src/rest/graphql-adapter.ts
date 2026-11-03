@@ -78,6 +78,12 @@ export interface GraphQlConnection
     readonly paging?: GraphQlPaging;
     /** Declared query-field equality arguments (`filterArgs`); absent when undeclared. */
     readonly filters?: DeclaredFilters;
+    /** The mutation argument carrying an optimistic write's expected version (`versionArg` + `versionArgType`); gates CanVersion. */
+    readonly version?: { readonly arg: string; readonly type: string };
+    /** Schema-aware upsert: one typed mutation argument per field (`upsertArgs`) instead of a single JSON input. */
+    readonly upsertArgs?: DeclaredFilters;
+    /** The key argument of a per-field upsert (`upsertKeyArg = "id:ID!"`). */
+    readonly upsertKeyArg?: { readonly arg: string; readonly type: string };
 }
 
 export class GraphQlConnectionConfig
@@ -99,6 +105,16 @@ export class GraphQlConnectionConfig
     private static readonly ItemsPathKey = "itemsPath";
     private static readonly NextTokenPathKey = "nextTokenPath";
     private static readonly FilterArgsKey = "filterArgs";
+    private static readonly VersionArgKey = "versionArg";
+    private static readonly VersionArgTypeKey = "versionArgType";
+    private static readonly UpsertArgsKey = "upsertArgs";
+    private static readonly UpsertKeyArgKey = "upsertKeyArg";
+    private static readonly DefaultKeyArg = "id";
+    private static readonly DefaultKeyType = "ID!";
+    private static readonly TypedArgSeparator = ":";
+    private static readonly TypePattern = /^\[?[_A-Za-z][_0-9A-Za-z]*!?\]?!?$/;
+    private static readonly VersionPairMessage = "graphql versionArg and versionArgType must be declared together";
+    private static readonly TypeMessage = "graphql argument type is not a valid GraphQL type";
     private static readonly PagingIncompleteMessage = "graphql paging config requires pageFirstArg, pageAfterArg, itemsPath and nextTokenPath";
     private static readonly PagingPathMessage = "graphql paging paths must start with the queryField and be distinct, non-nested paths below it";
     private static readonly DefaultUpsertInputType = "JSON";
@@ -141,6 +157,9 @@ export class GraphQlConnectionConfig
         const errorUnsupportedCodes = GraphQlConnectionConfig.ParseCodes(config[GraphQlConnectionConfig.ErrorUnsupportedCodesKey]);
         const paging = GraphQlConnectionConfig.ParsePaging(config, queryField);
         const filters = DeclaredFilters.Parse(config[GraphQlConnectionConfig.FilterArgsKey], true);
+        const version = GraphQlConnectionConfig.ParseVersion(config);
+        const upsertArgs = DeclaredFilters.Parse(config[GraphQlConnectionConfig.UpsertArgsKey], true);
+        const upsertKeyArg = upsertArgs.IsEmpty ? undefined : GraphQlConnectionConfig.ParseTypedArg(config[GraphQlConnectionConfig.UpsertKeyArgKey]);
         return {
             endpoint, headers, source, queryField,
             upsertInputType, upsertInputArg, deleteIdType, deleteIdArg,
@@ -150,7 +169,33 @@ export class GraphQlConnectionConfig
             ...(upsertReturn !== undefined ? { upsertReturn } : {}),
             ...(paging !== undefined ? { paging } : {}),
             ...(filters.IsEmpty ? {} : { filters }),
+            ...(version !== undefined ? { version } : {}),
+            ...(upsertArgs.IsEmpty ? {} : { upsertArgs, upsertKeyArg: upsertKeyArg! }),
         };
+    }
+
+    private static ParseVersion(config: Record<string, string>): { arg: string; type: string } | undefined
+    {
+        const arg = config[GraphQlConnectionConfig.VersionArgKey];
+        const type = config[GraphQlConnectionConfig.VersionArgTypeKey];
+        if (arg === undefined && type === undefined) return undefined;
+        if (arg === undefined || type === undefined) throw new Error(GraphQlConnectionConfig.VersionPairMessage);
+        return { arg: GraphQlName.Validate(arg), type: GraphQlConnectionConfig.ValidateType(type) };
+    }
+
+    /** `arg:Type`, defaulting to `id:ID!` when undeclared. */
+    private static ParseTypedArg(raw: string | undefined): { arg: string; type: string }
+    {
+        if (raw === undefined) return { arg: GraphQlConnectionConfig.DefaultKeyArg, type: GraphQlConnectionConfig.DefaultKeyType };
+        const [arg, type, ...rest] = raw.split(GraphQlConnectionConfig.TypedArgSeparator).map(p => p.trim());
+        if (arg === undefined || type === undefined || rest.length > 0) throw new Error(GraphQlConnectionConfig.TypeMessage);
+        return { arg: GraphQlName.Validate(arg), type: GraphQlConnectionConfig.ValidateType(type) };
+    }
+
+    private static ValidateType(type: string): string
+    {
+        if (!GraphQlConnectionConfig.TypePattern.test(type.trim())) throw new Error(GraphQlConnectionConfig.TypeMessage);
+        return type.trim();
     }
 
     /** No paging key = not configured; some-but-not-all keys, or paths outside the queryField, are config errors. */
@@ -260,6 +305,13 @@ export class GraphQlAdapter implements IDataSourceAdapter
     private static readonly PagedClose = " } }";
     private static readonly QueryKey = "query";
     private static readonly FilterVarPrefix = "f";
+    private static readonly VersionVariable = "version";
+    private static readonly KeyVariable = "key";
+    private static readonly FieldVariablePrefix = "a";
+    private static readonly MutationOpen = "mutation($";
+    private static readonly RequiredMarker = "!";
+    private static readonly VarsClose = "){ ";
+    private static readonly UndeclaredFieldPrefix = "graphql upsert has no declared argument for field: ";
     private static readonly VarSigil = "$";
     private static readonly FilteredQueryOpen = "query($";
     private static readonly FilteredVarsClose = "){ ";
@@ -270,10 +322,11 @@ export class GraphQlAdapter implements IDataSourceAdapter
     {
     }
 
-    /** Whether this adapter can enforce an optimistic version guard: no, a GraphQL mutation has no version precondition. */
+    /** Whether this adapter can enforce an optimistic version guard: only when the connection declares the mutation argument
+     *  that carries the expected version (the server enforces it and reports a stale version via an errorConflictCodes code). */
     public get CanVersion(): boolean
     {
-        return false;
+        return this.connection.version !== undefined;
     }
 
     /** Delegates to {@link FetchFailureClassifier}: a pure function of the thrown transport error. */
@@ -353,7 +406,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
         {
             return GraphQlAdapter.AllFailures(batch, WriteFailureKind.Unsupported, RestWriteReasons.TransactionUnsupported);
         }
-        if (batch.Concurrency === WriteConcurrency.Optimistic)
+        if (batch.Concurrency === WriteConcurrency.Optimistic && this.connection.version === undefined)
         {
             return GraphQlAdapter.AllFailures(batch, WriteFailureKind.Unsupported, GraphQlAdapter.OptimisticUnsupportedReason);
         }
@@ -397,7 +450,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
         {
             if (op.Kind === WriteOperationKind.Delete)
             {
-                return await this.ApplyDelete(op);
+                return await this.ApplyDelete(batch, op);
             }
             return await this.ApplyUpsert(batch, op);
         }
@@ -407,17 +460,26 @@ export class GraphQlAdapter implements IDataSourceAdapter
         }
     }
 
-    private async ApplyDelete(op: WriteOperation): Promise<WriteFailure | undefined>
+    private async ApplyDelete(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
     {
         const mutation = this.connection.deleteMutation;
         if (mutation === undefined)
         {
             return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.WriteNotConfiguredReason };
         }
-        const document = this.DeleteDocument(mutation);
+        const version = this.VersionFor(batch);
+        const variables: Record<string, unknown> = { [this.connection.deleteIdArg]: op.Key };
+        if (version !== undefined) variables[GraphQlAdapter.VersionVariable] = op.Version ?? null;
+        const document = this.DeleteDocument(mutation, version);
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
-            { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [this.connection.deleteIdArg]: op.Key } });
+            { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: variables });
         return this.MapResponse(response, mutation, op);
+    }
+
+    /** The declared version argument when this batch is optimistic (the expected version travels as $version). */
+    private VersionFor(batch: WriteBatch): { arg: string; type: string } | undefined
+    {
+        return batch.Concurrency === WriteConcurrency.Optimistic ? this.connection.version : undefined;
     }
 
     private async ApplyUpsert(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
@@ -428,10 +490,23 @@ export class GraphQlAdapter implements IDataSourceAdapter
             return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.WriteNotConfiguredReason };
         }
         const returnFields = this.connection.upsertReturn ?? [batch.IdKey];
-        const document = this.UpsertDocument(mutation, returnFields);
-        const input = { ...op.Fields, [batch.IdKey]: op.Key };
+        const version = this.VersionFor(batch);
+        let document: string;
+        let variables: Record<string, unknown>;
+        if (this.connection.upsertArgs !== undefined)
+        {
+            const typed = this.TypedUpsert(batch, op, mutation, returnFields, version);
+            if ("Kind" in typed) return typed;
+            [document, variables] = [typed.document, typed.variables];
+        }
+        else
+        {
+            document = this.UpsertDocument(mutation, returnFields, version);
+            variables = { [this.connection.upsertInputArg]: { ...op.Fields, [batch.IdKey]: op.Key } };
+        }
+        if (version !== undefined) variables[GraphQlAdapter.VersionVariable] = op.Version ?? null;
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
-            { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [this.connection.upsertInputArg]: input } });
+            { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: variables });
         const failure = this.MapResponse(response, mutation, op);
         if (failure !== undefined) return failure;
         if (returnFields.includes(batch.IdKey))
@@ -441,20 +516,71 @@ export class GraphQlAdapter implements IDataSourceAdapter
         return undefined;
     }
 
-    private UpsertDocument(mutation: string, returnFields: readonly string[]): string
+    private UpsertDocument(mutation: string, returnFields: readonly string[], version: { arg: string; type: string } | undefined): string
     {
         const arg = this.connection.upsertInputArg;
         return GraphQlAdapter.MutationVarOpen + arg + GraphQlAdapter.VarTypeSeparator + this.connection.upsertInputType
-            + GraphQlAdapter.RequiredSelectionOpen + mutation + GraphQlAdapter.ArgOpen + arg + GraphQlAdapter.ArgVarSeparator + arg
+            + GraphQlAdapter.RequiredMarker + GraphQlAdapter.VersionVarDef(version) + GraphQlAdapter.VarsClose
+            + mutation + GraphQlAdapter.ArgOpen + arg + GraphQlAdapter.ArgVarSeparator + arg + GraphQlAdapter.VersionArgBind(version)
             + GraphQlAdapter.UpsertSelectionOpen + returnFields.join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.UpsertSelectionClose;
     }
 
-    private DeleteDocument(mutation: string): string
+    /**
+     * Schema-aware upsert: the key and each field travel as their own declared, typed mutation argument
+     * (`upsertArgs = "name=name:String, region=region:String"`, `upsertKeyArg = "id:ID!"`). A field with no declared argument
+     * cannot be written (Unsupported for that op); the version column is skipped when undeclared, since a GraphQL source
+     * manages its own version and the expected version travels as the version argument.
+     */
+    private TypedUpsert(batch: WriteBatch, op: WriteOperation, mutation: string, returnFields: readonly string[], version: { arg: string; type: string } | undefined): { document: string; variables: Record<string, unknown> } | WriteFailure
+    {
+        const args = this.connection.upsertArgs!;
+        const key = this.connection.upsertKeyArg!;
+        const defs = [GraphQlAdapter.KeyVariable + GraphQlAdapter.VarTypeSeparator + key.type];
+        const binds = [key.arg + GraphQlAdapter.ArgVarSeparator + GraphQlAdapter.KeyVariable];
+        const variables: Record<string, unknown> = { [GraphQlAdapter.KeyVariable]: op.Key };
+        let i = 0;
+        for (const [field, value] of Object.entries(op.Fields))
+        {
+            if (field === batch.IdKey) continue;
+            const declared = args.For(field);
+            if (declared === undefined)
+            {
+                if (field === batch.VersionField) continue;
+                return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.UndeclaredFieldPrefix + field };
+            }
+            const name = GraphQlAdapter.FieldVariablePrefix + i++;
+            defs.push(name + GraphQlAdapter.VarTypeSeparator + declared.Type!);
+            binds.push(GraphQlName.Validate(declared.Target) + GraphQlAdapter.ArgVarSeparator + name);
+            variables[name] = value;
+        }
+        if (version !== undefined)
+        {
+            defs.push(GraphQlAdapter.VersionVariable + GraphQlAdapter.VarTypeSeparator + version.type);
+            binds.push(version.arg + GraphQlAdapter.ArgVarSeparator + GraphQlAdapter.VersionVariable);
+        }
+        const document = GraphQlAdapter.MutationOpen + defs.join(GraphQlAdapter.ArgSeparator + GraphQlAdapter.VarSigil) + GraphQlAdapter.VarsClose
+            + mutation + GraphQlAdapter.ArgOpen + binds.join(GraphQlAdapter.ArgSeparator)
+            + GraphQlAdapter.UpsertSelectionOpen + returnFields.join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.UpsertSelectionClose;
+        return { document, variables };
+    }
+
+    private DeleteDocument(mutation: string, version: { arg: string; type: string } | undefined): string
     {
         const arg = this.connection.deleteIdArg;
         return GraphQlAdapter.MutationVarOpen + arg + GraphQlAdapter.VarTypeSeparator + this.connection.deleteIdType
-            + GraphQlAdapter.RequiredSelectionOpen + mutation + GraphQlAdapter.ArgOpen + arg + GraphQlAdapter.ArgVarSeparator + arg
+            + GraphQlAdapter.RequiredMarker + GraphQlAdapter.VersionVarDef(version) + GraphQlAdapter.VarsClose
+            + mutation + GraphQlAdapter.ArgOpen + arg + GraphQlAdapter.ArgVarSeparator + arg + GraphQlAdapter.VersionArgBind(version)
             + GraphQlAdapter.DeleteArgsClose;
+    }
+
+    private static VersionVarDef(version: { arg: string; type: string } | undefined): string
+    {
+        return version === undefined ? "" : GraphQlAdapter.ArgSeparator + GraphQlAdapter.VarSigil + GraphQlAdapter.VersionVariable + GraphQlAdapter.VarTypeSeparator + version.type;
+    }
+
+    private static VersionArgBind(version: { arg: string; type: string } | undefined): string
+    {
+        return version === undefined ? "" : GraphQlAdapter.ArgSeparator + version.arg + GraphQlAdapter.ArgVarSeparator + GraphQlAdapter.VersionVariable;
     }
 
     /** Builds the paged document: the items branch ends in the field selection, the cursor branch in a scalar. */
