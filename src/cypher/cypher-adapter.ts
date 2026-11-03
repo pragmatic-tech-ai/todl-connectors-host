@@ -122,8 +122,9 @@ export class CypherAdapter implements IDataSourceAdapter
             CypherAdapter.AsKeyword, CypherAdapter.PropsAlias);
         const rows = await this.session.Run(parts.join(CypherAdapter.Space), params);
         const records = rows.map(r => (r[CypherAdapter.PropsAlias] ?? {}) as Record<string, unknown>);
-        // Pushed to narrow the pull; re-applied for the engine's exact semantics.
-        return ExternalQuery.Apply(records, request);
+        // Where is enforced at the source, exactly as for QueryPage (so paged and unpaged reads agree); project only. A
+        // re-filter here would disagree with Neo4j (e.g. Integer properties come back as decimal strings).
+        return ExternalQuery.Apply(records, { ...request, Where: undefined });
     }
 
     /**

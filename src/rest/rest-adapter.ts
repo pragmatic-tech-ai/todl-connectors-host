@@ -36,6 +36,12 @@ export class RestAdapter implements IDataSourceAdapter
     {
     }
 
+    /** The server assigns versions (ETags) itself; the engine never computes a next version for REST. */
+    public get SourceManagesVersions(): boolean
+    {
+        return true;
+    }
+
     /** Whether this adapter can enforce an optimistic version guard: yes, via the HTTP If-Match precondition. */
     public get CanVersion(): boolean
     {

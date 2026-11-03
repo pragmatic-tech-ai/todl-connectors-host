@@ -116,3 +116,31 @@ describe("GraphQL schema-aware upsert (upsertArgs)", () =>
         assert.equal(client.Bodies[0]!.query, "mutation($key: ID!, $a0: String){ upsertCustomer(id: $key, name: $a0){ id } }");
     });
 });
+
+describe("GraphQL config collisions and unversioned optimistic writes", () =>
+{
+    test("generated variable names, duplicate arguments and non-GraphQL targets are refused at config time", () =>
+    {
+        const base = WriteModelFixture.Versioned;
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, upsertInputArg: "version" }), /repeat a variable/);
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, deleteIdArg: "version" }), /repeat a variable/);
+        assert.doesNotThrow(() => GraphQlConnectionConfig.From({ ...WriteModelFixture.Base, deleteIdArg: "key" }));
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, filterArgs: "region=region:String", pageFirstArg: "f0", pageAfterArg: "after", itemsPath: "customers.nodes", nextTokenPath: "customers.next" }), /repeat a variable/);
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, upsertArgs: "a=name:String, b=name:String" }), /repeat a variable/);
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, upsertArgs: "a=expectedVersion:Int" }), /repeat a variable/);
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, upsertArgs: "a=customerId:String", upsertKeyArg: "customerId:ID!" }), /repeat a variable/);
+        assert.throws(() => GraphQlConnectionConfig.From({ ...base, filterArgs: "region=re-gion:String" }));
+    });
+
+    test("an optimistic upsert or delete with no expected version is a Conflict and nothing is sent", async () =>
+    {
+        const { adapter, client } = WriteModelFixture.Adapter(WriteModelFixture.Versioned);
+        const result = await adapter.Apply(WriteModelFixture.Batch([
+            { Kind: WriteOperationKind.Upsert, Key: "c1", Fields: { label: "x" } },
+            { Kind: WriteOperationKind.Delete, Key: "c2", Fields: {}, Version: null },
+        ], WriteConcurrency.Optimistic));
+        assert.deepEqual(result.Failures.map(f => f.Kind), [WriteFailureKind.Conflict, WriteFailureKind.Conflict]);
+        assert.equal(client.Bodies.length, 0);
+        assert.equal(adapter.SourceManagesVersions, true);
+    });
+});

@@ -41,7 +41,7 @@ test("CanVersion is advertised, and CanTransact tracks whether the session can t
     assert.equal(CypherFixture.MakeTransactional().CanTransact, true);
 });
 
-test("Query re-applies Where in-adapter even though the session returns all nodes", async () =>
+test("Query pushes Where to the source and trusts it (as QueryPage does)", async () =>
 {
     const session = new FakeCypherSession();
     session.Seed(CypherFixture.Customer, [{ id: "c1", label: "Acme" }, { id: "c2", label: "Globex" }]);
@@ -49,7 +49,8 @@ test("Query re-applies Where in-adapter even though the session returns all node
         Source: CypherFixture.Customer, Fields: [CypherFixture.IdKey],
         Where: { All: [{ Field: CypherFixture.IdKey, Op: QueryCompareOp.Eq, Value: "c2" }] },
     });
-    assert.deepEqual(rows, [{ id: "c2" }]);
+    assert.equal(session.Statements[0]!.cypher, "MATCH (n:`Customer`) WHERE n.`id` = $w0 RETURN properties(n) AS props");
+    assert.deepEqual(rows.map(r => r["id"]), ["c1", "c2"], "the fake source ignores WHERE; the adapter does not re-filter");
 });
 
 test("an optimistic version mismatch is a conflict, not applied, never thrown", async () =>
@@ -217,7 +218,7 @@ test("QueryPage defaults the order key to the first field and rejects bad limits
     await assert.rejects(t.Adapter.QueryPage({ Source: CypherFixture.Customer, Fields: [] }, { Limit: 1 }), /order/);
 });
 
-test("rich filter operators push to the source (Query re-applies them; QueryPage trusts them)", async () =>
+test("rich filter operators push to the source, and both Query and QueryPage trust it", async () =>
 {
     const t = CypherPagingFixture.Make([{ id: "k1", n: 3, region: "eu" }, { id: "k2", n: 9, region: "us" }, { id: "k3", n: 4, region: "eu", gone: "x" }]);
     const request: QueryRequest = {
@@ -232,7 +233,7 @@ test("rich filter operators push to the source (Query re-applies them; QueryPage
     const records = await t.Adapter.Query(request);
     assert.equal(t.Session.Statements[0]!.cypher, "MATCH (n:`Customer`) WHERE n.`n` >= $w0 AND n.`n` < $w1 AND n.`region` IN $w2 AND n.`gone` IS NULL RETURN properties(n) AS props");
     assert.deepEqual(t.Session.Statements[0]!.params, { w0: 3, w1: 9, w2: ["eu", "apac"] });
-    assert.deepEqual(records, [{ id: "k1" }]);
+    assert.deepEqual(records.map(r => r["id"]), ["k1", "k2", "k3"], "the fake source does not filter: Query trusts it like QueryPage");
     await t.Adapter.QueryPage({ ...request, Where: { All: [{ Field: "gone", Op: QueryCompareOp.IsNotNull, Value: null }] } }, { Limit: 5 });
     assert.equal(t.Session.Statements[1]!.cypher, "MATCH (n:`Customer`) WHERE n.`gone` IS NOT NULL RETURN properties(n) AS props ORDER BY n.`id` LIMIT toInteger($limit)");
 });

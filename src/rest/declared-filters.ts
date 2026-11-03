@@ -31,6 +31,8 @@ export class DeclaredFilters
     private static readonly TypeSeparator = ":";
     private static readonly NamePattern = /^[_A-Za-z][_0-9A-Za-z.-]*$/;
     private static readonly TypePattern = /^\[?[_A-Za-z][_0-9A-Za-z]*!?\]?!?$/;
+    // GraphQL argument names (a REST query param may also carry '.' / '-').
+    private static readonly GraphQlNamePattern = /^[_A-Za-z][_0-9A-Za-z]*$/;
     private static readonly MalformedMessage = "filter declaration must be 'field=target' entries separated by commas";
     private static readonly TypeRequiredMessage = "graphql filterArgs entries must be 'field=arg:Type'";
 
@@ -54,6 +56,7 @@ export class DeclaredFilters
                 throw new Error(DeclaredFilters.MalformedMessage);
             }
             if (typed && (type === undefined || !DeclaredFilters.TypePattern.test(type.trim()))) throw new Error(DeclaredFilters.TypeRequiredMessage);
+            if (typed && !DeclaredFilters.GraphQlNamePattern.test(name.trim())) throw new Error(DeclaredFilters.MalformedMessage);
             if (!typed && type !== undefined) throw new Error(DeclaredFilters.MalformedMessage);
             return typed ? { Field: field.trim(), Target: name.trim(), Type: type!.trim() } : { Field: field.trim(), Target: name.trim() };
         });
@@ -63,6 +66,12 @@ export class DeclaredFilters
     public get IsEmpty(): boolean
     {
         return this.filters.length === 0;
+    }
+
+    /** Every declared target (param / argument) name, in declaration order. */
+    public Targets(): string[]
+    {
+        return this.filters.map(f => f.Target);
     }
 
     /** The declared argument for one source field, if any. */

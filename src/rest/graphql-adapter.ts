@@ -114,6 +114,9 @@ export class GraphQlConnectionConfig
     private static readonly TypedArgSeparator = ":";
     private static readonly TypePattern = /^\[?[_A-Za-z][_0-9A-Za-z]*!?\]?!?$/;
     private static readonly VersionPairMessage = "graphql versionArg and versionArgType must be declared together";
+    private static readonly CollisionMessage = "graphql config would repeat a variable or argument (a configured name collides with a generated one, or two declarations share an argument)";
+    private static readonly VersionVariable = "version";
+    private static readonly FilterVariable = /^f\d+$/;
     private static readonly TypeMessage = "graphql argument type is not a valid GraphQL type";
     private static readonly PagingIncompleteMessage = "graphql paging config requires pageFirstArg, pageAfterArg, itemsPath and nextTokenPath";
     private static readonly PagingPathMessage = "graphql paging paths must start with the queryField and be distinct, non-nested paths below it";
@@ -160,6 +163,7 @@ export class GraphQlConnectionConfig
         const version = GraphQlConnectionConfig.ParseVersion(config);
         const upsertArgs = DeclaredFilters.Parse(config[GraphQlConnectionConfig.UpsertArgsKey], true);
         const upsertKeyArg = upsertArgs.IsEmpty ? undefined : GraphQlConnectionConfig.ParseTypedArg(config[GraphQlConnectionConfig.UpsertKeyArgKey]);
+        GraphQlConnectionConfig.RejectCollisions(upsertInputArg, deleteIdArg, filters, upsertArgs, upsertKeyArg?.arg, version?.arg, paging);
         return {
             endpoint, headers, source, queryField,
             upsertInputType, upsertInputArg, deleteIdType, deleteIdArg,
@@ -172,6 +176,36 @@ export class GraphQlConnectionConfig
             ...(version !== undefined ? { version } : {}),
             ...(upsertArgs.IsEmpty ? {} : { upsertArgs, upsertKeyArg: upsertKeyArg! }),
         };
+    }
+
+    /**
+     * Refuses configurations whose generated documents would repeat a variable or an argument: a configured variable name
+     * equal to one the adapter generates in the same document ($version beside the input / delete-id variable, $f0.. beside
+     * the paging variables), two fields mapped to one argument, or a declared argument equal to the key / version / paging
+     * argument it is sent beside. ($key / $a0.. live only in the typed-upsert document, which declares no configured
+     * variable.)
+     */
+    private static RejectCollisions(upsertInputArg: string, deleteIdArg: string, filters: DeclaredFilters, upsertArgs: DeclaredFilters, keyArg: string | undefined, versionArg: string | undefined, paging: GraphQlPaging | undefined): void
+    {
+        const unique = (names: readonly string[]): boolean => new Set(names).size === names.length;
+        // Variables each generated document declares beside the configured ones.
+        if (versionArg !== undefined && (upsertInputArg === GraphQlConnectionConfig.VersionVariable || deleteIdArg === GraphQlConnectionConfig.VersionVariable))
+        {
+            throw new Error(GraphQlConnectionConfig.CollisionMessage);
+        }
+        if (paging !== undefined && !filters.IsEmpty && [paging.firstArg, paging.afterArg].some(v => GraphQlConnectionConfig.FilterVariable.test(v)))
+        {
+            throw new Error(GraphQlConnectionConfig.CollisionMessage);
+        }
+        // Arguments each generated document passes to one field.
+        if (!unique([...upsertArgs.Targets(), ...(keyArg !== undefined ? [keyArg] : []), ...(versionArg !== undefined && !upsertArgs.IsEmpty ? [versionArg] : [])]))
+        {
+            throw new Error(GraphQlConnectionConfig.CollisionMessage);
+        }
+        if (!unique([...filters.Targets(), ...(paging !== undefined ? [paging.firstArg, paging.afterArg] : [])]))
+        {
+            throw new Error(GraphQlConnectionConfig.CollisionMessage);
+        }
     }
 
     private static ParseVersion(config: Record<string, string>): { arg: string; type: string } | undefined
@@ -312,6 +346,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
     private static readonly RequiredMarker = "!";
     private static readonly VarsClose = "){ ";
     private static readonly UndeclaredFieldPrefix = "graphql upsert has no declared argument for field: ";
+    private static readonly MissingVersionReason = "optimistic write has no expected version";
     private static readonly VarSigil = "$";
     private static readonly FilteredQueryOpen = "query($";
     private static readonly FilteredVarsClose = "){ ";
@@ -320,6 +355,12 @@ export class GraphQlAdapter implements IDataSourceAdapter
 
     public constructor(private readonly client: IRestHttpClient, private readonly connection: GraphQlConnection)
     {
+    }
+
+    /** A GraphQL server enforces (and assigns) versions itself; the engine never computes a next version for it. */
+    public get SourceManagesVersions(): boolean
+    {
+        return true;
     }
 
     /** Whether this adapter can enforce an optimistic version guard: only when the connection declares the mutation argument
@@ -468,12 +509,19 @@ export class GraphQlAdapter implements IDataSourceAdapter
             return { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.WriteNotConfiguredReason };
         }
         const version = this.VersionFor(batch);
+        if (version !== undefined && (op.Version === undefined || op.Version === null)) return GraphQlAdapter.Unversioned(op);
         const variables: Record<string, unknown> = { [this.connection.deleteIdArg]: op.Key };
         if (version !== undefined) variables[GraphQlAdapter.VersionVariable] = op.Version ?? null;
         const document = this.DeleteDocument(mutation, version);
         const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
             { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: variables });
         return this.MapResponse(response, mutation, op);
+    }
+
+    // An optimistic write with no expected version cannot be guarded: fail closed (Conflict) without sending anything.
+    private static Unversioned(op: WriteOperation): WriteFailure
+    {
+        return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: GraphQlAdapter.MissingVersionReason };
     }
 
     /** The declared version argument when this batch is optimistic (the expected version travels as $version). */
@@ -491,6 +539,7 @@ export class GraphQlAdapter implements IDataSourceAdapter
         }
         const returnFields = this.connection.upsertReturn ?? [batch.IdKey];
         const version = this.VersionFor(batch);
+        if (version !== undefined && (op.Version === undefined || op.Version === null)) return GraphQlAdapter.Unversioned(op);
         let document: string;
         let variables: Record<string, unknown>;
         if (this.connection.upsertArgs !== undefined)
