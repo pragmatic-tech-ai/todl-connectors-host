@@ -222,7 +222,7 @@ test("QueryPage merges the base filter with a strict $gt keyset term, sorts asce
     const rec = PagingFixture.Recorder([{ id: PagingFixture.K6, label: "a", tier: "gold" }, { id: PagingFixture.K7, label: "b" }]);
     const slice = await new DocumentAdapter(rec.Session).QueryPage(PagingFixture.Request(), { After: PagingFixture.After, Limit: 2 });
     assert.equal(rec.Calls.length, 1);
-    assert.deepEqual(rec.Calls[0]!.Filter, { [DocumentFixture.Tier]: DocumentFixture.Gold });
+    assert.deepEqual(rec.Calls[0]!.Filter, { $and: [{ [DocumentFixture.Tier]: { $eq: DocumentFixture.Gold } }] });
     assert.deepEqual(rec.Calls[0]!.Options, { Sort: { [PagingFixture.Key]: 1 }, After: { Field: PagingFixture.Key, Value: PagingFixture.After }, Limit: 2 });
     assert.equal(slice.NextAfter, PagingFixture.K7);
 });
@@ -231,7 +231,7 @@ test("QueryPage first page carries no $gt term but still sorts and limits", asyn
 {
     const rec = PagingFixture.Recorder([{ id: "k1", label: "a" }]);
     await new DocumentAdapter(rec.Session).QueryPage(PagingFixture.Request(), { Limit: 2 });
-    assert.deepEqual(rec.Calls[0]!.Filter, { [DocumentFixture.Tier]: DocumentFixture.Gold });
+    assert.deepEqual(rec.Calls[0]!.Filter, { $and: [{ [DocumentFixture.Tier]: { $eq: DocumentFixture.Gold } }] });
     assert.deepEqual(rec.Calls[0]!.Options, { Sort: { [PagingFixture.Key]: 1 }, After: undefined, Limit: 2 });
 });
 

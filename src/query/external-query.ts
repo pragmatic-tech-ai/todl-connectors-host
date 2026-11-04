@@ -1,22 +1,14 @@
-import { QueryCompareOp } from "@pragmatic-tech-ai/todl";
-import type { ExternalFieldValue, ExternalRecord, QueryComparison, QueryRequest } from "@pragmatic-tech-ai/todl";
+import { QueryFilterEvaluator } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, QueryRequest } from "@pragmatic-tech-ai/todl";
 
 /** In-adapter filter + projection with SQL-null semantics, matching the engine's InMemoryAdapter. */
 export class ExternalQuery
 {
     public static Apply(records: readonly Record<string, unknown>[], request: QueryRequest): ExternalRecord[]
     {
-        const comparisons = request.Where?.All ?? [];
-        const matched = records.filter(row => comparisons.every(c => ExternalQuery.Matches(row, c)));
+        // Every operator, with the engine's shared SQL-null semantics (QueryFilterEvaluator).
+        const matched = records.filter(row => QueryFilterEvaluator.Matches(row, request.Where));
         return matched.map(row => ExternalQuery.Project(row, request.Fields));
-    }
-
-    private static Matches(row: Record<string, unknown>, c: QueryComparison): boolean
-    {
-        const value = ExternalQuery.Coerce(row[c.Field]);
-        // NULL operand -> SQL UNKNOWN for both = and <> -> row excluded.
-        if (value === null || c.Value === null) return false;
-        return c.Op === QueryCompareOp.Neq ? value !== c.Value : value === c.Value;
     }
 
     private static Project(row: Record<string, unknown>, fields: readonly string[]): ExternalRecord

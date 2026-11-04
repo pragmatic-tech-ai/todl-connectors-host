@@ -36,6 +36,12 @@ export class RestAdapter implements IDataSourceAdapter
     {
     }
 
+    /** The server assigns versions (ETags) itself; the engine never computes a next version for REST. */
+    public get SourceManagesVersions(): boolean
+    {
+        return true;
+    }
+
     /** Whether this adapter can enforce an optimistic version guard: yes, via the HTTP If-Match precondition. */
     public get CanVersion(): boolean
     {
@@ -62,7 +68,8 @@ export class RestAdapter implements IDataSourceAdapter
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
-        const url = this.CollectionUrl(request.Source);
+        const filters = this.FilterParams(request);
+        const url = this.CollectionUrl(request.Source) + (filters.length === 0 ? "" : RestAdapter.QueryStart + filters.join(RestAdapter.QueryJoin));
         const payload = await this.client.GetJson(url, this.connection.headers);
         if (!Array.isArray(payload)) throw new Error(RestAdapter.ReadMalformedMessage);
         return ExternalQuery.Apply(payload as Record<string, unknown>[], request);
@@ -80,7 +87,7 @@ export class RestAdapter implements IDataSourceAdapter
         if (paging === undefined) throw new Error(RestAdapter.PagingNotConfiguredMessage);
         if (!Number.isInteger(page.Limit) || page.Limit <= 0) throw new Error(RestAdapter.InvalidLimitMessage);
         if (this.client.GetPage === undefined) throw new Error(RestAdapter.PagingClientMessage);
-        const params = [RestAdapter.Param(paging.limitParam, page.Limit)];
+        const params = [...this.FilterParams(request), RestAdapter.Param(paging.limitParam, page.Limit)];
         if (page.After !== undefined) params.push(RestAdapter.Param(paging.tokenParam, page.After));
         const url = this.CollectionUrl(request.Source) + RestAdapter.QueryStart + params.join(RestAdapter.QueryJoin);
         const response = await this.client.GetPage(url, this.connection.headers);
@@ -91,6 +98,13 @@ export class RestAdapter implements IDataSourceAdapter
             ? this.LinkToken(response.Link, paging.tokenParam)
             : JsonPath.AsToken(JsonPath.Read(response.Body, paging.nextTokenPath!));
         return next === undefined ? { Records: records } : { Records: records, NextAfter: next as ExternalFieldValue };
+    }
+
+    /** The declared server-side equality filters this request's Where drives, as encoded query params (narrowing only:
+     *  the full Where is re-applied in memory). */
+    private FilterParams(request: QueryRequest): string[]
+    {
+        return (this.connection.filters?.Pick(request.Where) ?? []).map(p => RestAdapter.Param(p.Filter.Target, p.Value));
     }
 
     private static Param(name: string, value: ExternalFieldValue | number): string
