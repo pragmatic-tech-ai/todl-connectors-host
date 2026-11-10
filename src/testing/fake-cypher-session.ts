@@ -135,7 +135,7 @@ export class FilteringFakeCypherSession extends FakeCypherSession
     private static readonly ReadReturn = ` ${CypherAdapter.Return} ${CypherAdapter.PropertiesFn}(${CypherAdapter.NodeVar}) ${CypherAdapter.AsKeyword} ${CypherAdapter.PropsAlias}`;
     private static readonly WhereMarker = ` ${CypherAdapter.Where} `;
     private static readonly AndSeparator = ` ${CypherAdapter.And} `;
-    private static readonly OrderByPattern = new RegExp(`${CypherAdapter.OrderBy} n\.\`((?:[^\`]|\`\`)*)\``);
+    private static readonly OrderByPattern = new RegExp(`${CypherAdapter.OrderBy} n\\.\`((?:[^\`]|\`\`)*)\``);
     private static readonly LimitMarker = ` ${CypherAdapter.Limit} `;
     private static readonly TermPattern = /^n\.`((?:[^`]|``)*)` (IS NOT NULL|IS NULL|<>|<=|>=|=|<|>|IN)(?: \$(\w+))?$/;
     private static readonly ErrTerm = "FilteringFakeCypherSession cannot evaluate WHERE term: ";

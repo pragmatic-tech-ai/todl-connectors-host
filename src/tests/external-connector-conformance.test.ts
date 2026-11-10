@@ -22,6 +22,13 @@ import { ExternalConformanceRun, ExternalConnectorConformance } from "../testing
 /** Every host adapter over the conformance fixture: source Customer seeded { id: 'c1', label: 'Acme' }. */
 class HostAdapters
 {
+    public static readonly SqlName = "SQL (pg-mem)";
+    public static readonly FaithfulSqlName = "SQL (pg-mem, version-faithful)";
+    public static readonly ReplicaSetDocumentName = "Document (replica-set fake)";
+    public static readonly StandaloneDocumentName = "Document (standalone fake)";
+    public static readonly RestName = "REST (fake client)";
+    public static readonly GraphQlName = "GraphQL (fake client)";
+    public static readonly CypherName = "Cypher (filtering fake session)";
     private static readonly BaseUrl = "https://api.example/v1";
     private static readonly Endpoint = "https://api.example/graphql";
     private static readonly GraphQlStyle = "graphql";
@@ -37,6 +44,11 @@ class HostAdapters
     public static async Sql(): Promise<IDataSourceAdapter>
     {
         return PgMemAdapterHarness.Make();
+    }
+
+    public static async FaithfulSql(): Promise<IDataSourceAdapter>
+    {
+        return PgMemAdapterHarness.MakeVersionFaithful();
     }
 
     public static async ReplicaSetDocument(): Promise<IDataSourceAdapter>
@@ -80,8 +92,15 @@ class NotNullSql
 {
     public static readonly Tier = "tier";
     public static readonly Gold = "gold";
+    private static readonly TitleOpen = "SQL (pg-mem, ";
+    private static readonly TitleClose = "): Delete then Create nulling a NOT NULL column surfaces as ExternalWriteFailed, row intact";
     private static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text, tier text not null)';
     private static readonly SeedSql = `INSERT INTO "Customer" (id, label, tier) VALUES ('c1', 'Acme', 'gold')`;
+
+    public static Title(atomicity: WriteAtomicity): string
+    {
+        return NotNullSql.TitleOpen + atomicity + NotNullSql.TitleClose;
+    }
 
     public static Make(): IDataSourceAdapter
     {
@@ -93,16 +112,17 @@ class NotNullSql
     }
 }
 
-ExternalConnectorConformance.Describe("SQL (pg-mem)", () => HostAdapters.Sql(), { HonorsVersionGuard: false, Paged: true });
-ExternalConnectorConformance.Describe("Document (replica-set fake)", () => HostAdapters.ReplicaSetDocument());
-ExternalConnectorConformance.Describe("Document (standalone fake)", () => HostAdapters.StandaloneDocument());
-ExternalConnectorConformance.Describe("REST (fake client)", () => HostAdapters.Rest());
-ExternalConnectorConformance.Describe("GraphQL (fake client)", () => HostAdapters.GraphQl());
-ExternalConnectorConformance.Describe("Cypher (filtering fake session)", () => HostAdapters.Cypher(), { Paged: true });
+ExternalConnectorConformance.Describe(HostAdapters.SqlName, () => HostAdapters.Sql(), { HonorsVersionGuard: false, Paged: true, Links: true });
+ExternalConnectorConformance.Describe(HostAdapters.FaithfulSqlName, () => HostAdapters.FaithfulSql(), { Paged: true, Links: true });
+ExternalConnectorConformance.Describe(HostAdapters.ReplicaSetDocumentName, () => HostAdapters.ReplicaSetDocument(), { Paged: true, Links: true });
+ExternalConnectorConformance.Describe(HostAdapters.StandaloneDocumentName, () => HostAdapters.StandaloneDocument(), { Paged: true, Links: true });
+ExternalConnectorConformance.Describe(HostAdapters.RestName, () => HostAdapters.Rest(), { Links: true });
+ExternalConnectorConformance.Describe(HostAdapters.GraphQlName, () => HostAdapters.GraphQl(), { Links: true });
+ExternalConnectorConformance.Describe(HostAdapters.CypherName, () => HostAdapters.Cypher(), { Paged: true, Links: true });
 
 for (const atomicity of [WriteAtomicity.Sequential, WriteAtomicity.Transactional])
 {
-    test(`SQL (pg-mem, ${atomicity}): Delete then Create nulling a NOT NULL column surfaces as ExternalWriteFailed, row intact`, async () =>
+    test(NotNullSql.Title(atomicity), async () =>
     {
         const run = ExternalConformanceRun.Open(NotNullSql.Make(), {
             Atomicity: atomicity,
