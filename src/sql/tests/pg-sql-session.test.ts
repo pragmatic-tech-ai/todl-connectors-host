@@ -245,6 +245,15 @@ test("ClassifyFailure is Permanent for non-object errors", () =>
     assert.equal(session.ClassifyFailure("08000"), ConnectionFailureKind.Permanent);
 });
 
+test("Dispose ends the pool once even when called repeatedly", async () =>
+{
+    let ends = 0;
+    const session = new PgSqlSession(new FakePool({ rows: [], rowCount: 0 }, () => { ends++; }).AsPool());
+    await session.Dispose();
+    await session.Dispose();
+    assert.equal(ends, 1);
+});
+
 // GATED LIVE: a real Postgres honours the pinned-client transaction -- COMMIT persists, ROLLBACK
 // undoes. Registered only when CONNECTORS_LIVE_PG is set and non-empty.
 const LiveEnvVar = "CONNECTORS_LIVE_PG";
