@@ -70,7 +70,8 @@ export interface IExternalConformanceOptions
 }
 
 /**
- * Sits between the connector and the adapter under test: records every batch the connector sends, and with
+ * Sits between the connector and the adapter under test: records every read (Query and QueryPage) and every batch the
+ * connector sends, and with
  * `ThrowNextApply` makes the next Apply throw before reaching the adapter (a write that never applied). Optional
  * capabilities are present exactly when the wrapped adapter has them.
  */
@@ -79,6 +80,7 @@ export class RecordingSourceAdapter implements IDataSourceAdapter
     private static readonly Simulated = "simulated adapter failure before the write reached the source";
 
     public readonly Batches: WriteBatch[] = [];
+    public readonly Reads: QueryRequest[] = [];
     public ThrowNextApply = false;
     public readonly ClassifyFailure?: (error: unknown) => ConnectionFailureKind;
     public readonly QueryPage?: (request: QueryRequest, page: PageQuery) => Promise<PageSlice>;
@@ -86,7 +88,11 @@ export class RecordingSourceAdapter implements IDataSourceAdapter
     public constructor(private readonly inner: IDataSourceAdapter)
     {
         if (inner.ClassifyFailure !== undefined) this.ClassifyFailure = error => inner.ClassifyFailure!(error);
-        if (inner.QueryPage !== undefined) this.QueryPage = (request, page) => inner.QueryPage!(request, page);
+        if (inner.QueryPage !== undefined) this.QueryPage = (request, page) =>
+        {
+            this.Reads.push(request);
+            return inner.QueryPage!(request, page);
+        };
     }
 
     public get CanTransact(): boolean | undefined
@@ -111,7 +117,14 @@ export class RecordingSourceAdapter implements IDataSourceAdapter
 
     public Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
+        this.Reads.push(request);
         return this.inner.Query(request);
+    }
+
+    /** The reads recorded so far, and forgets them. */
+    public TakeReads(): QueryRequest[]
+    {
+        return this.Reads.splice(0);
     }
 
     public async Apply(batch: WriteBatch): Promise<WriteResult>
@@ -369,6 +382,8 @@ export class ExternalConformanceRun
 interface IPushDownCase
 {
     readonly Title: string;
+    /** The source field the pushed Where must test. */
+    readonly Field: string;
     readonly Predicate: (r: ExternalConformanceRun) => Predicate;
     readonly Admits: (r: ExternalConformanceRun, row: IFetchedRow) => boolean;
     readonly Expected: readonly string[];
@@ -384,6 +399,7 @@ interface IPushDownCase
 export class ExternalConnectorConformance
 {
     private static readonly Separator = ": ";
+    private static readonly ErrNotPushed = "the fetch reached the source without a Where on ";
     private static readonly ScanTitle = "scan returns the seed row with a minted id";
     private static readonly KeyLookupTitle = "key lookup finds c1 and misses c9";
     private static readonly EqTitle = "push-down result equals no-push-down result";
@@ -436,8 +452,11 @@ export class ExternalConnectorConformance
             run(pushDown.Title, async r =>
             {
                 await r.SeedPushDown();
+                r.Recorder.TakeReads();
                 const pushed = await r.Drain(pushDown.Predicate(r));
+                C.AssertPushed(r.Recorder.TakeReads(), pushDown.Field);
                 const all = await r.Drain(TruePredicate.Instance);
+                C.AssertUnpushed(r.Recorder.TakeReads());
                 assert.equal(all.Rows.length, 4);
                 const unpushed = all.Rows.filter(row => pushDown.Admits(r, row));
                 assert.deepEqual(R.Ids(pushed.Rows), R.Ids(unpushed));
@@ -451,8 +470,11 @@ export class ExternalConnectorConformance
             {
                 await r.SeedPushDown();
                 const target = r.Id(R.SeedId);
+                r.Recorder.TakeReads();
                 const reverse = await r.Drain(TruePredicate.Instance, { Reverse: { Relationship: R.ParentMember, Target: target } });
+                C.AssertPushed(r.Recorder.TakeReads(), R.ParentField);
                 const all = await r.Drain(TruePredicate.Instance);
+                C.AssertUnpushed(r.Recorder.TakeReads());
                 const unpushed = all.Rows.filter(row => (row.Links.get(R.ParentMember) ?? []).includes(target));
                 assert.deepEqual(R.Ids(reverse.Rows), R.Ids(unpushed));
                 assert.deepEqual(R.Ids(reverse.Rows), [r.Id(R.NewId), r.Id(R.ThirdId)].sort());
@@ -570,35 +592,60 @@ export class ExternalConnectorConformance
         return [
             {
                 Title: C.EqTitle,
+                Field: R.LabelField,
                 Predicate: () => new Compare(R.LabelMember, CompareOp.Eq, R.SeedLabel),
                 Admits: (_r, row) => label(row) === R.SeedLabel,
                 Expected: [R.SeedId, R.ThirdId],
             },
             {
                 Title: C.InTitle,
+                Field: R.LabelField,
                 Predicate: () => new In(R.LabelMember, [R.NewLabel, R.ThirdLabel]),
                 Admits: (_r, row) => label(row) === R.NewLabel || label(row) === R.ThirdLabel,
                 Expected: [R.NewId],
             },
             {
                 Title: C.IsNullTitle,
+                Field: R.LabelField,
                 Predicate: () => new IsNull(R.LabelMember),
                 Admits: (_r, row) => label(row) === null,
                 Expected: [R.FourthId],
             },
             {
                 Title: C.NotNullTitle,
+                Field: R.LabelField,
                 Predicate: () => new Not(new IsNull(R.LabelMember)),
                 Admits: (_r, row) => label(row) !== null,
                 Expected: [R.SeedId, R.NewId, R.ThirdId],
             },
             {
                 Title: C.IdInTitle,
+                Field: R.IdKey,
                 Predicate: r => new IdIn(new Set([r.Id(R.SeedId), r.Id(R.FourthId), r.Id(R.MissingId), R.ForeignId])),
                 Admits: (r, row) => row.PublicId === r.Id(R.SeedId) || row.PublicId === r.Id(R.FourthId),
                 Expected: [R.SeedId, R.FourthId],
             },
         ];
+    }
+
+    /** Every read of a pushed fetch carried a Where testing `field` (the connector really pushed the predicate). */
+    private static AssertPushed(reads: readonly QueryRequest[], field: string): void
+    {
+        assert.ok(reads.length > 0);
+        for (const read of reads)
+        {
+            assert.ok((read.Where?.All ?? []).some(term => term.Field === field), ExternalConnectorConformance.ErrNotPushed + field);
+        }
+    }
+
+    /** No read of the unpushed comparison fetch carried a Where. */
+    private static AssertUnpushed(reads: readonly QueryRequest[]): void
+    {
+        assert.ok(reads.length > 0);
+        for (const read of reads)
+        {
+            assert.equal(read.Where, undefined);
+        }
     }
 
     /** Registers one case over a fresh run of the fixture binding, disposing it afterwards. */
