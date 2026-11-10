@@ -71,9 +71,8 @@ export interface IExternalConformanceOptions
 
 /**
  * Sits between the connector and the adapter under test: records every read (Query and QueryPage) and every batch the
- * connector sends, and with
- * `ThrowNextApply` makes the next Apply throw before reaching the adapter (a write that never applied). Optional
- * capabilities are present exactly when the wrapped adapter has them.
+ * connector sends, and with `ThrowNextApply` makes the next Apply throw before reaching the adapter (a write that never
+ * applied). Optional capabilities are present exactly when the wrapped adapter has them.
  */
 export class RecordingSourceAdapter implements IDataSourceAdapter
 {
