@@ -1,4 +1,4 @@
-import type { ExternalFieldValue } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, WriteBatch } from "@pragmatic-tech-ai/todl";
 
 /**
  * The versioning state of one document, probed via a single read. Distinguishes an absent
@@ -25,8 +25,12 @@ export interface IDocumentSession
     Find(collection: string, filter: Record<string, unknown>, options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>;
     Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>;
     Delete(collection: string, idField: string, key: unknown): Promise<boolean>;
-    /** Probes a document's existence and stored version in one read (absent vs present-unversioned vs versioned). */
-    ReadVersionState?(source: string, idKey: string, key: ExternalFieldValue): Promise<VersionState>;
+    /**
+     * Probes a document's existence and the version stored under versionField in one read (absent vs
+     * present-unversioned vs versioned). The field is the batch's {@link WriteBatch.VersionField}, so the
+     * probe reads the same field the write path stores (never a separately configured one that can drift).
+     */
+    ReadVersionState?(source: string, idKey: string, key: ExternalFieldValue, versionField: string): Promise<VersionState>;
     /** Runs work inside a backend transaction; present only when the deployment can transact (e.g. a replica set). */
     Transaction?<T>(work: (tx: IDocumentSession) => Promise<T>): Promise<T>;
     Dispose?(): Promise<void>;

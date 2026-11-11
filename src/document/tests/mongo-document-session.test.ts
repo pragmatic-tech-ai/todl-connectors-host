@@ -108,3 +108,27 @@ test("paged Find with an empty base filter uses the bare seek; the no-options pa
     assert.equal(plain.Rec.Limit, undefined);
     assert.deepEqual(plain.Rec.FindOptions, { projection: { _id: 0 } });
 });
+
+class StubVersionFixture
+{
+    public static readonly Collection = "Customer";
+    public static readonly Key = "id";
+    public static readonly SeedId = "c1";
+    public static readonly VersionField = "rev";
+    public static readonly StoredVersion = "2";
+
+    /** A session whose findOne returns a document carrying a stored version under VersionField (as Mongo stores it). */
+    public static Make(): MongoDocumentSession
+    {
+        const doc = { [StubVersionFixture.Key]: StubVersionFixture.SeedId, [StubVersionFixture.VersionField]: StubVersionFixture.StoredVersion };
+        const client = { db: () => ({ collection: () => ({ findOne: async () => doc }) }) };
+        return new MongoDocumentSession(client as never, "db");
+    }
+}
+
+test("ReadVersionState reads the stored version from the batch's version field, with no connection-level config", async () =>
+{
+    const state = await StubVersionFixture.Make().ReadVersionState(
+        StubVersionFixture.Collection, StubVersionFixture.Key, StubVersionFixture.SeedId, StubVersionFixture.VersionField);
+    assert.deepEqual(state, { Exists: true, Version: StubVersionFixture.StoredVersion });
+});

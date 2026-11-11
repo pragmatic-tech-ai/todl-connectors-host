@@ -10,14 +10,12 @@ export interface DocumentConnection
     readonly url: string;
     readonly database: string;
     readonly user?: string;
-    readonly versionField?: string;
     readonly replicaSet?: boolean;
 }
 
 export class DocumentConnectionConfig
 {
     public static readonly UserKey = "user";
-    public static readonly VersionFieldKey = "versionField";
     public static readonly ReplicaSetKey = "replicaSet";
     public static readonly UrlKey = "url";
     private static readonly UriKey = "uri";
@@ -33,13 +31,11 @@ export class DocumentConnectionConfig
         // The secret is NOT read here; it flows only to the driver's auth option in MongoDocumentSession.Connect.
         void secret;
         const user = config[DocumentConnectionConfig.UserKey];
-        const versionField = config[DocumentConnectionConfig.VersionFieldKey];
         const replicaSet = config[DocumentConnectionConfig.ReplicaSetKey] === DocumentConnectionConfig.TrueValue;
         return {
             url,
             database,
             ...(user !== undefined ? { user } : {}),
-            ...(versionField !== undefined ? { versionField } : {}),
             ...(replicaSet ? { replicaSet } : {}),
         };
     }
@@ -56,7 +52,6 @@ export class MongoDocumentSession implements IDocumentSession
     public constructor(
         protected readonly client: MongoClient,
         protected readonly database: string,
-        protected readonly versionField?: string,
         // When present, every operation runs on this driver session so it joins an open transaction.
         private readonly clientSession?: ClientSession)
     {
@@ -82,9 +77,9 @@ export class MongoDocumentSession implements IDocumentSession
         const client = new MongoClient(connection.url, options);
         if (connection.replicaSet === true)
         {
-            return new ReplicaSetMongoDocumentSession(client, connection.database, connection.versionField);
+            return new ReplicaSetMongoDocumentSession(client, connection.database);
         }
-        return new MongoDocumentSession(client, connection.database, connection.versionField);
+        return new MongoDocumentSession(client, connection.database);
     }
 
     public async Find(collection: string, filter: Record<string, unknown>, options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>
@@ -133,19 +128,20 @@ export class MongoDocumentSession implements IDocumentSession
 
     /**
      * Probes a document in a single findOne, distinguishing three states so the adapter can fail CLOSED:
-     * absent (doc null -> Exists:false), present-but-unversioned (Version null, e.g. versionField
-     * unconfigured or the field missing), and versioned (Version is the stored value).
+     * absent (doc null -> Exists:false), present-but-unversioned (Version null: the versionField is missing),
+     * and versioned (Version is the value stored under versionField, the batch's version field).
      */
-    public async ReadVersionState(source: string, idKey: string, key: ExternalFieldValue): Promise<VersionState>
+    public async ReadVersionState(source: string, idKey: string, key: ExternalFieldValue, versionField: string): Promise<VersionState>
     {
         DocumentIdentifier.Validate(source);
         DocumentIdentifier.Validate(idKey);
+        DocumentIdentifier.Validate(versionField);
         const doc = await this.client.db(this.database).collection(source).findOne({ [idKey]: key }, this.SessionOption());
         if (doc === null)
         {
             return { Exists: false };
         }
-        const version = this.versionField === undefined ? null : (doc[this.versionField] ?? null);
+        const version = doc[versionField] ?? null;
         return { Exists: true, Version: version as ExternalFieldValue | null };
     }
 
@@ -176,7 +172,7 @@ export class ReplicaSetMongoDocumentSession extends MongoDocumentSession
             let outcome: T;
             await clientSession.withTransaction(async () =>
             {
-                outcome = await work(new MongoDocumentSession(this.client, this.database, this.versionField, clientSession));
+                outcome = await work(new MongoDocumentSession(this.client, this.database, clientSession));
             });
             return outcome!;
         }

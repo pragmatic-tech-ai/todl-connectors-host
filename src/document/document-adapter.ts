@@ -245,7 +245,7 @@ export class DocumentAdapter implements IDataSourceAdapter
     {
         if (batch.Concurrency === WriteConcurrency.Optimistic && batch.VersionField !== undefined)
         {
-            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key);
+            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key, batch.VersionField);
             if (state.Exists)
             {
                 const incoming = op.Version ?? null;
@@ -264,7 +264,7 @@ export class DocumentAdapter implements IDataSourceAdapter
     {
         if (batch.Concurrency === WriteConcurrency.Optimistic && batch.VersionField !== undefined)
         {
-            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key);
+            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key, batch.VersionField);
             if (state.Exists)
             {
                 // Apply only when a present row's stored version matches op.Version with BOTH non-null.

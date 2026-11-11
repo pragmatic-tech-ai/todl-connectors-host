@@ -51,10 +51,10 @@ export class SeedingDocumentSession implements IDocumentSession
         return this.inner.Delete(collection, idField, key);
     }
 
-    public async ReadVersionState(source: string, idKey: string, key: ExternalFieldValue): Promise<VersionState>
+    public async ReadVersionState(source: string, idKey: string, key: ExternalFieldValue, versionField: string): Promise<VersionState>
     {
         await this.EnsureSeeded();
-        return this.inner.ReadVersionState(source, idKey, key);
+        return this.inner.ReadVersionState(source, idKey, key, versionField);
     }
 
     public async Dispose(): Promise<void>
