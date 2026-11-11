@@ -179,6 +179,39 @@ test("Transaction issues ROLLBACK and rethrows when work throws, still releasing
     assert.equal(client.released, 1);
 });
 
+/** A recording client whose ROLLBACK itself fails (the connection dropped mid-transaction). */
+class FailingRollbackClient extends RecordingClient
+{
+    public static readonly Rollback = "ROLLBACK";
+    public static readonly RollbackFailure = new Error("rollback failed");
+    public static readonly RollbackErrorProperty = "rollbackError";
+    public static readonly Title = "Transaction rethrows the work error, not a failing ROLLBACK's, and attaches the latter as rollbackError";
+    public static readonly WorkFailure = "work failed";
+
+    public override async query(sql: string, params: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>
+    {
+        const result = await super.query(sql, params);
+        if (sql === FailingRollbackClient.Rollback)
+        {
+            throw FailingRollbackClient.RollbackFailure;
+        }
+        return result;
+    }
+}
+
+test(FailingRollbackClient.Title, async () =>
+{
+    const client = new FailingRollbackClient();
+    const session = new PgSqlSession(new RecordingPool(client).AsPool());
+    const boom = new Error(FailingRollbackClient.WorkFailure);
+    await assert.rejects(session.Transaction(async () =>
+    {
+        throw boom;
+    }), (error: unknown) => error === boom && (error as unknown as Record<string, unknown>)[FailingRollbackClient.RollbackErrorProperty] === FailingRollbackClient.RollbackFailure);
+    assert.deepEqual(client.queries, ["BEGIN", FailingRollbackClient.Rollback]);
+    assert.equal(client.released, 1);
+});
+
 const ClassificationTable: readonly [string | undefined, ConnectionFailureKind][] =
 [
     ["08000", ConnectionFailureKind.Transient],
@@ -210,6 +243,15 @@ test("ClassifyFailure is Permanent for non-object errors", () =>
     const session = new PgSqlSession(new FakePool({ rows: [], rowCount: 0 }, () => { }).AsPool());
     assert.equal(session.ClassifyFailure(null), ConnectionFailureKind.Permanent);
     assert.equal(session.ClassifyFailure("08000"), ConnectionFailureKind.Permanent);
+});
+
+test("Dispose ends the pool once even when called repeatedly", async () =>
+{
+    let ends = 0;
+    const session = new PgSqlSession(new FakePool({ rows: [], rowCount: 0 }, () => { ends++; }).AsPool());
+    await session.Dispose();
+    await session.Dispose();
+    assert.equal(ends, 1);
 });
 
 // GATED LIVE: a real Postgres honours the pinned-client transaction -- COMMIT persists, ROLLBACK

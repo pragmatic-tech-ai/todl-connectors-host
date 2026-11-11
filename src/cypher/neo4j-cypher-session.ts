@@ -13,7 +13,7 @@ export interface CypherConnection
 
 export class CypherConnectionConfig
 {
-    private static readonly UriKey = "uri";
+    public static readonly UriKey = "uri";
     public static readonly UserKey = "user";
     private static readonly DatabaseKey = "database";
     private static readonly DefaultUser = "neo4j";

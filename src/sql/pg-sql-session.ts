@@ -112,6 +112,8 @@ export class PgSqlSession extends PgSessionBase
     private static readonly Rollback = "ROLLBACK";
     private static readonly RollbackErrorProperty = "rollbackError";
 
+    private ended = false;
+
     public constructor(private readonly pool: Pool)
     {
         // pg's Pool.query has a wider overload set than IPgQueryable's single (sql, params) signature,
@@ -157,8 +159,11 @@ export class PgSqlSession extends PgSessionBase
         }
     }
 
+    /** Ends the pool; idempotent, since pg's Pool.end throws when called twice. */
     public async Dispose(): Promise<void>
     {
+        if (this.ended) return;
+        this.ended = true;
         await this.pool.end();
     }
 }

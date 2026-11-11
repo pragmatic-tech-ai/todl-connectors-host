@@ -1,7 +1,13 @@
 import type { ExternalFieldValue } from "@pragmatic-tech-ai/todl";
 import type { DocumentFindOptions, IDocumentSession, VersionState } from "../document/document-session.js";
 
-/** In-memory document store. Find ignores the filter and returns every doc (the adapter re-filters). */
+/**
+ * In-memory document store. Find ignores the filter (the adapter re-filters every read in memory) but honours the
+ * options as the driver does: Sort orders by its fields, After keeps only documents whose Field is strictly greater than
+ * Value (a missing or null field never is, as with `$gt`), and Limit caps the result. Because the filter is ignored, a
+ * filtered page may come back sparser than the driver's, but a drain still visits every matching document, since the
+ * adapter takes its NextAfter from the unfiltered page.
+ */
 export class FakeDocumentSession implements IDocumentSession
 {
     private static readonly VersionProperty = "rev";
@@ -20,9 +26,19 @@ export class FakeDocumentSession implements IDocumentSession
         return this;
     }
 
-    public async Find(collection: string, _filter: Record<string, unknown>, _options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>
+    public async Find(collection: string, _filter: Record<string, unknown>, options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>
     {
-        return [...(this.store.get(collection)?.values() ?? [])];
+        let docs = [...(this.store.get(collection)?.values() ?? [])];
+        const after = options?.After;
+        if (after !== undefined)
+        {
+            docs = docs.filter(d => FakeDocumentSession.Order(d[after.Field] ?? null, after.Value) > 0);
+        }
+        for (const [field, direction] of Object.entries(options?.Sort ?? {}).reverse())
+        {
+            docs.sort((a, b) => direction * FakeDocumentSession.Order(a[field] ?? null, b[field] ?? null));
+        }
+        return options?.Limit === undefined ? docs : docs.slice(0, options.Limit);
     }
 
     public async Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>
@@ -45,6 +61,15 @@ export class FakeDocumentSession implements IDocumentSession
             return { Exists: false };
         }
         return { Exists: true, Version: (doc[FakeDocumentSession.VersionProperty] ?? null) as ExternalFieldValue | null };
+    }
+
+    /** Ascending order with nulls first; a null never compares greater, so a strict seek drops it. */
+    private static Order(a: unknown, b: unknown): number
+    {
+        if (a === b) return 0;
+        if (a === null) return -1;
+        if (b === null) return 1;
+        return (a as string | number) < (b as string | number) ? -1 : 1;
     }
 
     /** Deep-copies the store so a transaction can roll back to this point. */
