@@ -12,6 +12,7 @@ export class DocumentAdapter implements IDataSourceAdapter
     private static readonly MissingOrderKeyMessage = "QueryPage requires request.OrderKey or at least one field to order by";
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly AtomicUnsupportedReason = "atomic write not supported by this connector";
+    private static readonly OptimisticUnsupportedReason = "optimistic write not supported by this connector (its session cannot read versions)";
 
     private static readonly NetworkErrorNames: ReadonlySet<string> = new Set(["MongoNetworkError", "MongoServerSelectionError", "MongoNetworkTimeoutError"]);
     private static readonly TransientLabels: ReadonlySet<string> = new Set(["RetryableWriteError", "ResumableChangeStreamError"]);
@@ -21,10 +22,10 @@ export class DocumentAdapter implements IDataSourceAdapter
     {
     }
 
-    /** Whether this adapter can enforce an optimistic version guard: always, via {@link IDocumentSession.ReadVersionState}. */
+    /** Whether this adapter can enforce an optimistic version guard: iff its session can {@link IDocumentSession.ReadVersionState}. */
     public get CanVersion(): boolean
     {
-        return true;
+        return this.session.ReadVersionState !== undefined;
     }
 
     /** Whether this adapter supports keyset paging: always, via a sorted, limited, `$gt`-seeked Find. */
@@ -116,6 +117,11 @@ export class DocumentAdapter implements IDataSourceAdapter
                 DocumentIdentifier.Validate(field);
             }
         }
+        if (batch.Concurrency === WriteConcurrency.Optimistic && !WriteCapability.CanVersion(this))
+        {
+            // Fail closed: a session that cannot probe versions must never run an Optimistic batch unguarded.
+            return DocumentAdapter.AllFailures(batch, WriteFailureKind.Unsupported, DocumentAdapter.OptimisticUnsupportedReason);
+        }
         if (batch.Atomicity === WriteAtomicity.Transactional)
         {
             return this.ApplyTransactional(batch);
@@ -161,14 +167,7 @@ export class DocumentAdapter implements IDataSourceAdapter
     {
         if (!WriteCapability.CanTransact(this))
         {
-            return {
-                Applied: 0,
-                Failures: batch.Operations.map(op => ({
-                    Key: op.Key,
-                    Kind: WriteFailureKind.Unsupported,
-                    Reason: DocumentAdapter.AtomicUnsupportedReason,
-                })),
-            };
+            return DocumentAdapter.AllFailures(batch, WriteFailureKind.Unsupported, DocumentAdapter.AtomicUnsupportedReason);
         }
         try
         {
@@ -281,6 +280,12 @@ export class DocumentAdapter implements IDataSourceAdapter
         // LastWriteWins (or an absent/matching optimistic row): unconditional upsert, incoming overwrites.
         await session.Upsert(batch.Source, batch.IdKey, op.Key, { ...op.Fields, [batch.IdKey]: op.Key });
         return true;
+    }
+
+    /** Every op of the batch failed with the same kind and reason; nothing applied. */
+    private static AllFailures(batch: WriteBatch, kind: WriteFailureKind, reason: string): WriteResult
+    {
+        return { Applied: 0, Failures: batch.Operations.map(op => ({ Key: op.Key, Kind: kind, Reason: reason })) };
     }
 
     private static ErrorReason(error: unknown): string

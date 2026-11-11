@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { ConnectionFailureKind } from "@pragmatic-tech-ai/todl";
 import { MongoDocumentSession } from "../mongo-document-session.js";
 import { DocumentAdapter } from "../document-adapter.js";
-import type { IDocumentSession } from "../document-session.js";
+import type { IDocumentSession, VersionState } from "../document-session.js";
 
 class MongoConnectFixture
 {
@@ -117,18 +117,36 @@ class StubVersionFixture
     public static readonly VersionField = "rev";
     public static readonly StoredVersion = "2";
 
-    /** A session whose findOne returns a document carrying a stored version under VersionField (as Mongo stores it). */
-    public static Make(): MongoDocumentSession
+    public static readonly Database = "db";
+
+    /** A session whose findOne returns the given document (null when absent), as the driver does. */
+    public static Make(doc: Record<string, unknown> | null): MongoDocumentSession
     {
-        const doc = { [StubVersionFixture.Key]: StubVersionFixture.SeedId, [StubVersionFixture.VersionField]: StubVersionFixture.StoredVersion };
         const client = { db: () => ({ collection: () => ({ findOne: async () => doc }) }) };
-        return new MongoDocumentSession(client as never, "db");
+        return new MongoDocumentSession(client as never, StubVersionFixture.Database);
+    }
+
+    public static Probe(doc: Record<string, unknown> | null): Promise<VersionState>
+    {
+        return StubVersionFixture.Make(doc).ReadVersionState(
+            StubVersionFixture.Collection, StubVersionFixture.Key, StubVersionFixture.SeedId, StubVersionFixture.VersionField);
     }
 }
 
 test("ReadVersionState reads the stored version from the batch's version field, with no connection-level config", async () =>
 {
-    const state = await StubVersionFixture.Make().ReadVersionState(
-        StubVersionFixture.Collection, StubVersionFixture.Key, StubVersionFixture.SeedId, StubVersionFixture.VersionField);
+    const state = await StubVersionFixture.Probe(
+        { [StubVersionFixture.Key]: StubVersionFixture.SeedId, [StubVersionFixture.VersionField]: StubVersionFixture.StoredVersion });
     assert.deepEqual(state, { Exists: true, Version: StubVersionFixture.StoredVersion });
+});
+
+test("ReadVersionState reports a present document without the version field as unversioned (Version null)", async () =>
+{
+    const state = await StubVersionFixture.Probe({ [StubVersionFixture.Key]: StubVersionFixture.SeedId });
+    assert.deepEqual(state, { Exists: true, Version: null });
+});
+
+test("ReadVersionState reports an absent document as Exists false", async () =>
+{
+    assert.deepEqual(await StubVersionFixture.Probe(null), { Exists: false });
 });
