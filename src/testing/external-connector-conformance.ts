@@ -44,6 +44,7 @@ import {
     DataSourceConnector,
     EngineBridgeErrorCode,
     ExternalIdentity,
+    ExternalVersionConflict,
     ExternalWriteError,
     type IExternalBinding,
     type IExternalConnectorPlan,
@@ -54,9 +55,8 @@ export interface IExternalConformanceOptions
 {
     /**
      * Whether the backing store faithfully reports the affected-row count of an optimistic version guard. Defaults true;
-     * the per-op failure case then provokes a version conflict (when the adapter CanVersion). The plain pg-mem fixture
-     * sets it false (its ON CONFLICT ... WHERE reports rowCount 1 even when the guard excluded the row), so that case
-     * writes to an unknown source instead.
+     * the version-conflict case then runs (when the adapter CanVersion). The plain pg-mem fixture sets it false (its
+     * ON CONFLICT ... WHERE reports rowCount 1 even when the guard excluded the row), so that case is skipped.
      */
     readonly HonorsVersionGuard?: boolean;
     /** Whether the adapter pages (CanPage) over a store that really pages; registers `paged fetch drains`. Defaults false. */
@@ -77,15 +77,19 @@ export interface IExternalConformanceOptions
 /**
  * Sits between the connector and the adapter under test: records every read (Query and QueryPage) and every batch the
  * connector sends, and with `ThrowNextApply` makes the next Apply throw before reaching the adapter (a write that never
- * applied). Optional capabilities are present exactly when the wrapped adapter has them.
+ * applied); with `FailNextApply` the next Apply instead reports every operation as a non-conflict Error failure without
+ * reaching the adapter (a source that rejected each write). Optional capabilities are present exactly when the wrapped
+ * adapter has them.
  */
 export class RecordingSourceAdapter implements IDataSourceAdapter
 {
     private static readonly Simulated = "simulated adapter failure before the write reached the source";
+    private static readonly Rejected = "simulated per-operation rejection by the source";
 
     public readonly Batches: WriteBatch[] = [];
     public readonly Reads: QueryRequest[] = [];
     public ThrowNextApply = false;
+    public FailNextApply = false;
     public readonly ClassifyFailure?: (error: unknown) => ConnectionFailureKind;
     public readonly QueryPage?: (request: QueryRequest, page: PageQuery) => Promise<PageSlice>;
 
@@ -139,12 +143,23 @@ export class RecordingSourceAdapter implements IDataSourceAdapter
             this.ThrowNextApply = false;
             throw new Error(RecordingSourceAdapter.Simulated);
         }
+        if (this.FailNextApply)
+        {
+            this.FailNextApply = false;
+            return RecordingSourceAdapter.RejectAll(batch);
+        }
         return this.inner.Apply(batch);
     }
 
     public Dispose(): Promise<void>
     {
         return this.inner.Dispose();
+    }
+
+    /** Every operation of `batch` as a non-conflict Error failure: nothing applied. */
+    private static RejectAll(batch: WriteBatch): WriteResult
+    {
+        return { Applied: 0, Failures: batch.Operations.map(o => ({ Key: o.Key, Kind: WriteFailureKind.Error, Reason: RecordingSourceAdapter.Rejected })) };
     }
 
     /** Every Delete the connector sent, by key, in order. */
@@ -166,7 +181,6 @@ export class ExternalConformanceRun
     public static readonly Connector = "hostdb";
     public static readonly Concept = "conformance.Customer";
     public static readonly Source = "Customer";
-    public static readonly UnknownSource = "Nope";
     public static readonly IdMember = "id";
     public static readonly LabelMember = "label";
     public static readonly ParentMember = "parent";
@@ -422,6 +436,8 @@ export class ExternalConnectorConformance
     private static readonly CompensateTitle = "revert of a create that never applied is not a CompensationFailed";
     private static readonly RevertTitle = "revert after commit restores the before-image";
     private static readonly FailureTitle = "per-op failure surfaces as ExternalWriteFailed";
+    private static readonly ConflictTitle = "source-reported version conflict on an Optimistic batch surfaces as ExternalVersionConflict";
+    private static readonly SkipUnversioned = "the adapter cannot version, or the store does not honor the version guard";
 
     public static Describe(name: string, make: () => Promise<IDataSourceAdapter>, options?: IExternalConformanceOptions): void
     {
@@ -552,32 +568,47 @@ export class ExternalConnectorConformance
             assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.SeedLabel)]);
         });
 
-        test(C.Title(name, C.FailureTitle), async () =>
+        // A non-conflict per-op failure the source reports (here every op rejected as Error, nothing applied) surfaces as
+        // ExternalWriteFailed (only a Conflict becomes ExternalVersionConflict), and a Revert leaves the source as it was.
+        run(C.FailureTitle, async r =>
+        {
+            const id = r.Id(R.NewId);
+            const tx = await r.Stage([R.Create(id), R.Set(id, R.LabelMember, R.NewLabel)]);
+            r.Recorder.FailNextApply = true;
+            await assert.rejects(tx.Commit(), (error: unknown) =>
+            {
+                assert.ok(error instanceof ExternalWriteError);
+                assert.equal(error.Code, EngineBridgeErrorCode.ExternalWriteFailed);
+                assert.equal(error.Failures.length, 1);
+                assert.equal(error.Failures[0]!.Kind, WriteFailureKind.Error);
+                return true;
+            });
+            await tx.Revert();
+            assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.SeedLabel)]);
+        });
+
+        test(C.Title(name, C.ConflictTitle), async t =>
         {
             const adapter = await make();
-            // A version conflict needs an adapter that can version over a store that honors the guard: the seed row is
-            // present but unversioned, so the before-image version (null) fails closed. Otherwise write to a source the
-            // store does not hold.
-            const versioned = honorsVersionGuard && adapter.CanVersion === true;
-            const r = R.Open(adapter, versioned
-                ? { Concurrency: WriteConcurrency.Optimistic, VersionField: R.VersionField }
-                : { Source: R.UnknownSource }, [], links, source);
+            // A version conflict needs an adapter that can version over a store that honors the guard.
+            if (!honorsVersionGuard || adapter.CanVersion !== true)
+            {
+                await adapter.Dispose();
+                t.skip(C.SkipUnversioned);
+                return;
+            }
+            // The seed row is present but unversioned, so the before-image version (null) fails closed at the source,
+            // and an adapter-reported Conflict on an Optimistic batch is an ExternalVersionConflict (R122).
+            const r = R.Open(adapter, { Concurrency: WriteConcurrency.Optimistic, VersionField: R.VersionField }, [], links, source);
             try
             {
-                const id = r.Id(versioned ? R.SeedId : R.NewId);
-                const changes = versioned
-                    ? [R.Set(id, R.LabelMember, R.UpdatedLabel)]
-                    : [R.Create(id), R.Set(id, R.LabelMember, R.NewLabel)];
-                const tx = await r.Stage(changes);
+                const tx = await r.Stage([R.Set(r.Id(R.SeedId), R.LabelMember, R.UpdatedLabel)]);
                 await assert.rejects(tx.Commit(), (error: unknown) =>
                 {
-                    assert.ok(error instanceof ExternalWriteError);
-                    assert.equal(error.Code, EngineBridgeErrorCode.ExternalWriteFailed);
+                    assert.ok(error instanceof ExternalVersionConflict);
+                    assert.ok(!(error instanceof ExternalWriteError));
                     assert.equal(error.Failures.length, 1);
-                    if (versioned)
-                    {
-                        assert.equal(error.Failures[0]!.Kind, WriteFailureKind.Conflict);
-                    }
+                    assert.equal(error.Failures[0]!.Kind, WriteFailureKind.Conflict);
                     return true;
                 });
                 await tx.Revert();
