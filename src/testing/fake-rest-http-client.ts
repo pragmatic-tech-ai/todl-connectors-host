@@ -6,6 +6,9 @@ export class FakeRestHttpClient implements IRestHttpClient
 {
     private static readonly OkStatus = 200;
     private static readonly IdField = "id";
+    private static readonly VersionField = "rev";
+    private static readonly IfMatchHeader = "If-Match";
+    private static readonly PreconditionFailedStatus = 412;
     private static readonly PathSeparator = "/";
     private static readonly NoSource = "";
     private static readonly TrailingSlashes = /\/+$/;
@@ -35,7 +38,7 @@ export class FakeRestHttpClient implements IRestHttpClient
         return [...(this.store.get(source)?.values() ?? [])];
     }
 
-    public async Send(method: RestHttpMethod, url: string, _headers: Record<string, string>, body?: unknown): Promise<RestResponse>
+    public async Send(method: RestHttpMethod, url: string, headers: Record<string, string>, body?: unknown): Promise<RestResponse>
     {
         if (this.failStatus !== undefined)
         {
@@ -48,7 +51,16 @@ export class FakeRestHttpClient implements IRestHttpClient
         this.store.set(source, bucket);
         if (method === RestHttpMethod.Delete)
         {
-            if (key !== undefined) bucket.delete(key);
+            if (key !== undefined)
+            {
+                // A delete carrying If-Match is honored as a server would: it applies only when the stored version matches.
+                const expected = headers[FakeRestHttpClient.IfMatchHeader];
+                if (expected !== undefined && String(bucket.get(key)?.[FakeRestHttpClient.VersionField]) !== expected)
+                {
+                    return { Status: FakeRestHttpClient.PreconditionFailedStatus, Body: undefined };
+                }
+                bucket.delete(key);
+            }
         }
         else if (key !== undefined)
         {

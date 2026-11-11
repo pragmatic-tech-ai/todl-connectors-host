@@ -17,6 +17,9 @@ export class CypherAdapter implements IDataSourceAdapter
     public static readonly NodeVar = "n";
     public static readonly PropsAlias = "props";
     public static readonly VersionAlias = "ver";
+    public static readonly VersionParam = "ver";
+    public static readonly DeletedAlias = "deleted";
+    public static readonly CountFn = "count";
     public static readonly KeyParam = "key";
     public static readonly FieldsParam = "fields";
     public static readonly Match = "MATCH";
@@ -299,9 +302,11 @@ export class CypherAdapter implements IDataSourceAdapter
         {
             if (op.Kind === WriteOperationKind.Delete)
             {
-                // Delete is unconditional in v1: no version guard.
-                await this.Delete(session, batch, op);
-                return undefined;
+                if (await this.Delete(session, batch, op))
+                {
+                    return undefined;
+                }
+                return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: CypherAdapter.VersionConflictReason };
             }
             if (await this.ApplyUpsert(session, batch, op))
             {
@@ -368,10 +373,32 @@ export class CypherAdapter implements IDataSourceAdapter
         return { Exists: true, Version: rows[0]![CypherAdapter.VersionAlias] ?? null };
     }
 
-    private async Delete(session: ICypherSession, batch: WriteBatch, op: WriteOperation): Promise<void>
+    /**
+     * Deletes the node; returns false for a Conflict. LastWriteWins (or no VersionField) deletes unconditionally.
+     * Optimistic is fail-closed: a null op.Version is a Conflict with no statement run, otherwise the delete is
+     * guarded in the MATCH (`WHERE n.<ver> = $ver DETACH DELETE n RETURN count(n)`) and a count of 0 (stale,
+     * unversioned or absent) is a Conflict.
+     */
+    private async Delete(session: ICypherSession, batch: WriteBatch, op: WriteOperation): Promise<boolean>
     {
-        const cypher = [CypherAdapter.Match, this.IdPattern(batch), CypherAdapter.DetachDelete, CypherAdapter.NodeVar].join(CypherAdapter.Space);
-        await session.Run(cypher, { [CypherAdapter.KeyParam]: op.Key });
+        const params: Record<string, unknown> = { [CypherAdapter.KeyParam]: op.Key };
+        if (batch.Concurrency !== WriteConcurrency.Optimistic || batch.VersionField === undefined)
+        {
+            await session.Run([CypherAdapter.Match, this.IdPattern(batch), CypherAdapter.DetachDelete, CypherAdapter.NodeVar].join(CypherAdapter.Space), params);
+            return true;
+        }
+        if (op.Version === undefined || op.Version === null)
+        {
+            return false;
+        }
+        params[CypherAdapter.VersionParam] = op.Version;
+        const versionRef = `${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(batch.VersionField)}`;
+        const count = `${CypherAdapter.CountFn}${CypherAdapter.OpenParen}${CypherAdapter.NodeVar}${CypherAdapter.CloseParen}`;
+        const cypher = [CypherAdapter.Match, this.IdPattern(batch), CypherAdapter.Where, versionRef, CypherAdapter.EqualOp,
+            `${CypherAdapter.ParamPrefix}${CypherAdapter.VersionParam}`, CypherAdapter.DetachDelete, CypherAdapter.NodeVar,
+            CypherAdapter.Return, count, CypherAdapter.AsKeyword, CypherAdapter.DeletedAlias].join(CypherAdapter.Space);
+        const rows = await session.Run(cypher, params);
+        return Number(rows[0]?.[CypherAdapter.DeletedAlias] ?? 0) > 0;
     }
 
     private static ErrorReason(error: unknown): string

@@ -22,6 +22,11 @@ export class FakeCypherSession implements ICypherSession
         "^(?:MATCH|MERGE) \\(n:`" + FakeCypherSession.QuotedName + "`(?: \\{`" + FakeCypherSession.QuotedName + "`:[^}]*\\})?\\)");
     private static readonly VersionFieldPattern = new RegExp("^n\\.`" + FakeCypherSession.QuotedName + "`");
 
+    // WHERE n.`ver` = $ver DETACH DELETE n RETURN count(n) AS deleted
+    private static readonly GuardedDeletePattern = new RegExp(
+        "^" + CypherAdapter.Where + " n\\.`" + FakeCypherSession.QuotedName + "` " + CypherAdapter.EqualOp
+        + " \\$" + CypherAdapter.VersionParam + " " + CypherAdapter.DetachDelete + " ");
+
     public readonly Statements: RecordedStatement[] = [];
     protected readonly store = new Map<string, Map<string, Record<string, unknown>>>();
 
@@ -52,6 +57,15 @@ export class FakeCypherSession implements ICypherSession
             const fields = params[CypherAdapter.FieldsParam] as Record<string, unknown>;
             live.set(key, { ...(live.get(key) ?? {}), ...fields, [idField]: params[CypherAdapter.KeyParam] });
             return [];
+        }
+        const guarded = FakeCypherSession.GuardedDeletePattern.exec(tail);
+        if (guarded !== null)
+        {
+            const node = bucket?.get(key);
+            const version = node?.[FakeCypherSession.Unescape(guarded[1]!)];
+            const matches = node !== undefined && version !== undefined && version !== null && version === params[CypherAdapter.VersionParam];
+            if (matches) bucket!.delete(key);
+            return [{ [CypherAdapter.DeletedAlias]: matches ? 1 : 0 }];
         }
         if (tail.startsWith(CypherAdapter.DetachDelete))
         {

@@ -217,9 +217,11 @@ export class DocumentAdapter implements IDataSourceAdapter
         {
             if (op.Kind === WriteOperationKind.Delete)
             {
-                // Delete is unconditional in v1: no version guard.
-                await session.Delete(batch.Source, batch.IdKey, op.Key);
-                return undefined;
+                if (await this.ApplyDelete(session, batch, op))
+                {
+                    return undefined;
+                }
+                return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: DocumentAdapter.VersionConflictReason };
             }
             if (await this.ApplyUpsert(session, batch, op))
             {
@@ -231,6 +233,30 @@ export class DocumentAdapter implements IDataSourceAdapter
         {
             return { Key: op.Key, Kind: WriteFailureKind.Error, Reason: DocumentAdapter.ErrorReason(error) };
         }
+    }
+
+    /**
+     * Runs one delete against the given session; returns false when a version-guarded delete must not apply.
+     * An Optimistic delete probes ReadVersionState first: a present document whose stored version is null, differs
+     * from op.Version, or is deleted with a null op.Version is a Conflict (fail-closed); an absent document has
+     * nothing to delete.
+     */
+    private async ApplyDelete(session: IDocumentSession, batch: WriteBatch, op: WriteOperation): Promise<boolean>
+    {
+        if (batch.Concurrency === WriteConcurrency.Optimistic && batch.VersionField !== undefined)
+        {
+            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key);
+            if (state.Exists)
+            {
+                const incoming = op.Version ?? null;
+                if (state.Version === null || incoming === null || state.Version !== incoming)
+                {
+                    return false;
+                }
+            }
+        }
+        await session.Delete(batch.Source, batch.IdKey, op.Key);
+        return true;
     }
 
     /** Runs one upsert against the given session; returns false when a version-guarded upsert must not apply. */
