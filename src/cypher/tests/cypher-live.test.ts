@@ -1,41 +1,9 @@
 import { test, after } from "node:test";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { CypherAdapter } from "../cypher-adapter.js";
-import type { CypherRow, ICypherSession } from "../cypher-session.js";
 import { CypherConnectionConfig, Neo4jCypherSession } from "../neo4j-cypher-session.js";
 import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
-
-/** Resets the :Customer graph to c1/Acme before its first Run, so each contract test starts isolated. */
-class SeedingCypherSession implements ICypherSession
-{
-    private static readonly ResetCypher = "MATCH (n:Customer) DETACH DELETE n";
-    private static readonly SeedCypher = "CREATE (:Customer { id: $id, label: $label })";
-    private static readonly SeedParams = { id: "c1", label: "Acme" };
-
-    private seeded: Promise<unknown> | undefined;
-
-    public constructor(private readonly inner: Neo4jCypherSession)
-    {
-    }
-
-    public async Run(cypher: string, params: Record<string, unknown>): Promise<readonly CypherRow[]>
-    {
-        this.seeded ??= this.Seed();
-        await this.seeded;
-        return this.inner.Run(cypher, params);
-    }
-
-    public async Dispose(): Promise<void>
-    {
-        await this.inner.Dispose();
-    }
-
-    private async Seed(): Promise<void>
-    {
-        await this.inner.Run(SeedingCypherSession.ResetCypher, {});
-        await this.inner.Run(SeedingCypherSession.SeedCypher, SeedingCypherSession.SeedParams);
-    }
-}
+import { SeedingCypherSession } from "../../testing/seeding-cypher-session.js";
 
 class LiveNeo4j
 {
@@ -72,7 +40,7 @@ class LiveNeo4j
 
     private static Make(uri: string): IDataSourceAdapter
     {
-        const config: Record<string, string> = { uri };
+        const config: Record<string, string> = { [CypherConnectionConfig.UriKey]: uri };
         const user = process.env[LiveNeo4j.UserVar];
         if (user !== undefined && user !== "") config[CypherConnectionConfig.UserKey] = user;
         const session = Neo4jCypherSession.Connect(CypherConnectionConfig.From(config, process.env[LiveNeo4j.PasswordVar]));
