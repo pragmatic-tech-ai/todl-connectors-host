@@ -1,71 +1,9 @@
 import { test, after } from "node:test";
-import type { ExternalFieldValue, IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
+import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { DocumentAdapter } from "../document-adapter.js";
-import type { IDocumentSession, VersionState } from "../document-session.js";
 import { DocumentConnectionConfig, MongoDocumentSession } from "../mongo-document-session.js";
 import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
-
-/** Resets the Customer collection to c1/Acme before its first use, so each contract test starts isolated. */
-class SeedingDocumentSession implements IDocumentSession
-{
-    private static readonly Collection = "Customer";
-    private static readonly IdField = "id";
-    private static readonly LabelField = "label";
-    private static readonly SeedId = "c1";
-    private static readonly SeedLabel = "Acme";
-
-    private seeded: Promise<void> | undefined;
-
-    public constructor(private readonly inner: MongoDocumentSession)
-    {
-    }
-
-    public async Find(collection: string, filter: Record<string, unknown>): Promise<readonly Record<string, unknown>[]>
-    {
-        await this.EnsureSeeded();
-        return this.inner.Find(collection, filter);
-    }
-
-    public async Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>
-    {
-        await this.EnsureSeeded();
-        return this.inner.Upsert(collection, idField, key, doc);
-    }
-
-    public async Delete(collection: string, idField: string, key: unknown): Promise<boolean>
-    {
-        await this.EnsureSeeded();
-        return this.inner.Delete(collection, idField, key);
-    }
-
-    public async ReadVersionState(source: string, idKey: string, key: ExternalFieldValue): Promise<VersionState>
-    {
-        await this.EnsureSeeded();
-        return this.inner.ReadVersionState(source, idKey, key);
-    }
-
-    public async Dispose(): Promise<void>
-    {
-        await this.inner.Dispose();
-    }
-
-    private EnsureSeeded(): Promise<void>
-    {
-        this.seeded ??= this.Reset();
-        return this.seeded;
-    }
-
-    private async Reset(): Promise<void>
-    {
-        const existing = await this.inner.Find(SeedingDocumentSession.Collection, {});
-        for (const doc of existing)
-        {
-            await this.inner.Delete(SeedingDocumentSession.Collection, SeedingDocumentSession.IdField, doc[SeedingDocumentSession.IdField]);
-        }
-        await this.inner.Upsert(SeedingDocumentSession.Collection, SeedingDocumentSession.IdField, SeedingDocumentSession.SeedId,
-            { [SeedingDocumentSession.IdField]: SeedingDocumentSession.SeedId, [SeedingDocumentSession.LabelField]: SeedingDocumentSession.SeedLabel });
-    }
-}
+import { SeedingDocumentSession } from "../../testing/seeding-document-session.js";
 
 class LiveMongo
 {

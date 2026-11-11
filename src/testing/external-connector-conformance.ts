@@ -67,6 +67,11 @@ export interface IExternalConformanceOptions
      * Defaults false.
      */
     readonly Links?: boolean;
+    /**
+     * The source (table, collection or label) the fixture binds; defaults to ExternalConformanceRun.Source (Customer).
+     * A live registration gives its own name so suites that run concurrently over one store never reset each other's rows.
+     */
+    readonly Source?: string;
 }
 
 /**
@@ -152,7 +157,7 @@ export class RecordingSourceAdapter implements IDataSourceAdapter
 /**
  * One conformance case's DataSourceConnector over a fresh adapter, as an environment host opens it: the adapter wrapped
  * in a RecordingSourceAdapter, then in VersionBumpingAdapter (as DataSourceAdapterCatalog wraps every adapter), and one
- * binding of concept `conformance.Customer` to source Customer (IdKey `id`, FieldMap id → id, label → label, and
+ * binding of concept `conformance.Customer` to source `SourceName` (default Customer; IdKey `id`, FieldMap id → id, label → label, and
  * parent → parent when the run maps links). The connector does not own the adapter; dispose() releases it.
  */
 export class ExternalConformanceRun
@@ -189,6 +194,7 @@ export class ExternalConformanceRun
         public readonly Identity: ExternalIdentity,
         public readonly Connector: DataSourceConnector,
         public readonly Links: boolean,
+        public readonly SourceName: string,
     )
     {
     }
@@ -208,15 +214,16 @@ export class ExternalConformanceRun
 
     /**
      * A connector over `adapter` with the fixture binding (relationship `parent` mapped when `links`), `overrides` applied,
-     * and `members` added to the concept.
+     * and `members` added to the concept, bound to `source`.
      */
-    public static Open(adapter: IDataSourceAdapter, overrides: Partial<ConnectorBinding> = {}, members: readonly MemberInput[] = [], links = false): ExternalConformanceRun
+    public static Open(adapter: IDataSourceAdapter, overrides: Partial<ConnectorBinding> = {}, members: readonly MemberInput[] = [], links = false,
+        source: string = ExternalConformanceRun.Source): ExternalConformanceRun
     {
         const binding: IExternalBinding = {
             Model: ExternalConformanceRun.Model,
             Connector: ExternalConformanceRun.Connector,
             Binding: {
-                Concept: ExternalConformanceRun.Concept, Connector: ExternalConformanceRun.Connector, Source: ExternalConformanceRun.Source,
+                Concept: ExternalConformanceRun.Concept, Connector: ExternalConformanceRun.Connector, Source: source,
                 IdKey: ExternalConformanceRun.IdKey, FieldMap: ExternalConformanceRun.FieldMap(links), Writable: true,
                 Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
                 ...overrides,
@@ -231,8 +238,8 @@ export class ExternalConformanceRun
         const description = ExternalConformanceRun.Description(members);
         const identity = new ExternalIdentity(description, plan.Bindings);
         const recorder = new RecordingSourceAdapter(adapter);
-        const connector = new DataSourceConnector(plan, new VersionBumpingAdapter(recorder), identity, description);
-        return new ExternalConformanceRun(adapter, recorder, binding, identity, connector, links);
+        const connector = new DataSourceConnector(plan, new VersionBumpingAdapter(recorder), identity);
+        return new ExternalConformanceRun(adapter, recorder, binding, identity, connector, links, source);
     }
 
     public static Create(publicId: string): ConnectorChange
@@ -298,7 +305,7 @@ export class ExternalConformanceRun
     public async Seed(rows: readonly ExternalRecord[]): Promise<void>
     {
         const result = await this.Adapter.Apply({
-            Source: ExternalConformanceRun.Source, IdKey: ExternalConformanceRun.IdKey,
+            Source: this.SourceName, IdKey: ExternalConformanceRun.IdKey,
             Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
             Operations: rows.map(row =>
             {
@@ -326,7 +333,7 @@ export class ExternalConformanceRun
     /** Every row of the source as it is now, in `fields`, sorted by key (bypassing the connector). */
     public async Rows(fields: readonly string[] = [ExternalConformanceRun.IdKey, ExternalConformanceRun.LabelField]): Promise<ExternalRecord[]>
     {
-        const rows = await this.Adapter.Query({ Source: ExternalConformanceRun.Source, Fields: [...fields] });
+        const rows = await this.Adapter.Query({ Source: this.SourceName, Fields: [...fields] });
         return [...rows].sort((a, b) => String(a[ExternalConformanceRun.IdKey]).localeCompare(String(b[ExternalConformanceRun.IdKey])));
     }
 
@@ -392,8 +399,8 @@ interface IPushDownCase
  * The contract a host data-source adapter must satisfy when an engine DataSourceConnector serves it (M2.2 Task 9): reads
  * (scan, key lookup, every advisory push-down of the P10 set, reverse lookup, paging) and writes (create, update,
  * delete, delete of a missing key, revert, per-op failure) through the connector, checked against the source itself.
- * `make` must return a fresh adapter holding source Customer seeded { id: 'c1', label: 'Acme' } (the fixture contract
- * of adapter-conformance.ts).
+ * `make` must return a fresh adapter holding source `options.Source` (default Customer) seeded { id: 'c1', label: 'Acme' }
+ * (the fixture contract of adapter-conformance.ts).
  */
 export class ExternalConnectorConformance
 {
@@ -422,9 +429,10 @@ export class ExternalConnectorConformance
         const R = ExternalConformanceRun;
         const honorsVersionGuard = options?.HonorsVersionGuard ?? true;
         const links = options?.Links ?? false;
+        const source = options?.Source ?? R.Source;
         const run = (title: string, body: (r: ExternalConformanceRun) => Promise<void>): void =>
         {
-            C.Case(name, title, make, links, body);
+            C.Case(name, title, make, links, source, body);
         };
 
         run(C.ScanTitle, async r =>
@@ -553,7 +561,7 @@ export class ExternalConnectorConformance
             const versioned = honorsVersionGuard && adapter.CanVersion === true;
             const r = R.Open(adapter, versioned
                 ? { Concurrency: WriteConcurrency.Optimistic, VersionField: R.VersionField }
-                : { Source: R.UnknownSource }, [], links);
+                : { Source: R.UnknownSource }, [], links, source);
             try
             {
                 const id = r.Id(versioned ? R.SeedId : R.NewId);
@@ -648,11 +656,12 @@ export class ExternalConnectorConformance
     }
 
     /** Registers one case over a fresh run of the fixture binding, disposing it afterwards. */
-    private static Case(name: string, title: string, make: () => Promise<IDataSourceAdapter>, links: boolean, body: (r: ExternalConformanceRun) => Promise<void>): void
+    private static Case(name: string, title: string, make: () => Promise<IDataSourceAdapter>, links: boolean, source: string,
+        body: (r: ExternalConformanceRun) => Promise<void>): void
     {
         test(ExternalConnectorConformance.Title(name, title), async () =>
         {
-            const r = ExternalConformanceRun.Open(await make(), {}, [], links);
+            const r = ExternalConformanceRun.Open(await make(), {}, [], links, source);
             try
             {
                 await body(r);

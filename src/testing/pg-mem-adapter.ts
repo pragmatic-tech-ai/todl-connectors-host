@@ -12,8 +12,25 @@ export class PgMemAdapterHarness
      *  Carries the `rev` version column so the optimistic version-guard conformance cases (SqlAdapter now
      *  advertises CanVersion) have a column to guard on; the seed leaves it NULL (present-but-unversioned).
      *  Carries the `parent` column for the external-connector conformance's reverse lookup (a foreign key to Customer). */
-    public static readonly CreateTableSql = 'CREATE TABLE "Customer" (id text primary key, label text, rev text, parent text)';
-    public static readonly SeedSql = `INSERT INTO "Customer" (id, label) VALUES ('c1', 'Acme')`;
+    public static readonly DefaultTable = "Customer";
+    private static readonly CreateTableOpen = 'CREATE TABLE "';
+    private static readonly CreateTableClose = '" (id text primary key, label text, rev text, parent text)';
+    private static readonly SeedOpen = 'INSERT INTO "';
+    private static readonly SeedClose = `" (id, label) VALUES ('c1', 'Acme')`;
+    public static readonly CreateTableSql = PgMemAdapterHarness.CreateTableSqlFor(PgMemAdapterHarness.DefaultTable);
+    public static readonly SeedSql = PgMemAdapterHarness.SeedSqlFor(PgMemAdapterHarness.DefaultTable);
+
+    /** The fixture table's CREATE statement under the name `table` (a plain identifier). */
+    public static CreateTableSqlFor(table: string): string
+    {
+        return PgMemAdapterHarness.CreateTableOpen + table + PgMemAdapterHarness.CreateTableClose;
+    }
+
+    /** The fixture seed (c1/Acme) into `table`. */
+    public static SeedSqlFor(table: string): string
+    {
+        return PgMemAdapterHarness.SeedOpen + table + PgMemAdapterHarness.SeedClose;
+    }
 
     /** A fresh, isolated in-process database per call. */
     public static Make(): IDataSourceAdapter
@@ -116,12 +133,12 @@ export class PgMemFaithfulSession implements ISqlSession
     }
 }
 
-/** Wraps a live session; before first use, drops/recreates Customer and seeds c1/Acme. */
+/** Wraps a live session; before first use, drops/recreates the fixture table `table` and seeds c1/Acme. */
 class ResettingSession implements ISqlSession
 {
     private ready: Promise<void> | undefined;
 
-    public constructor(private readonly inner: ISqlSession)
+    public constructor(private readonly inner: ISqlSession, private readonly table: string)
     {
     }
 
@@ -150,23 +167,33 @@ class ResettingSession implements ISqlSession
 
     private async Reset(): Promise<void>
     {
-        await this.inner.Execute(PgLiveHarness.DropTableSql, []);
-        await this.inner.Execute(PgMemAdapterHarness.CreateTableSql, []);
-        await this.inner.Execute(PgMemAdapterHarness.SeedSql, []);
+        await this.inner.Execute(PgLiveHarness.DropTableSqlFor(this.table), []);
+        await this.inner.Execute(PgMemAdapterHarness.CreateTableSqlFor(this.table), []);
+        await this.inner.Execute(PgMemAdapterHarness.SeedSqlFor(this.table), []);
     }
 }
 
-/** Builds adapters over a real Postgres, resetting Customer(id PK, label) to c1/Acme on each adapter's first use. */
+/**
+ * Builds adapters over a real Postgres, resetting the fixture table (id PK, label; default Customer) to c1/Acme on each
+ * adapter's first use. Live files that run concurrently pass distinct table names so one never drops another's table.
+ */
 export class PgLiveHarness
 {
-    public static readonly DropTableSql = 'DROP TABLE IF EXISTS "Customer"';
+    private static readonly DropTableOpen = 'DROP TABLE IF EXISTS "';
+    private static readonly DropTableClose = '"';
+    public static readonly DropTableSql = PgLiveHarness.DropTableSqlFor(PgMemAdapterHarness.DefaultTable);
 
     private static readonly Opened: IDataSourceAdapter[] = [];
 
-    public static Make(connectionString: string): IDataSourceAdapter
+    public static DropTableSqlFor(table: string): string
+    {
+        return PgLiveHarness.DropTableOpen + table + PgLiveHarness.DropTableClose;
+    }
+
+    public static Make(connectionString: string, table: string = PgMemAdapterHarness.DefaultTable): IDataSourceAdapter
     {
         const pool = new Pool({ connectionString });
-        const adapter = new SqlAdapter(new ResettingSession(new PgSqlSession(pool)));
+        const adapter = new SqlAdapter(new ResettingSession(new PgSqlSession(pool), table));
         PgLiveHarness.Opened.push(adapter);
         return adapter;
     }
