@@ -12,6 +12,7 @@ export class DocumentAdapter implements IDataSourceAdapter
     private static readonly MissingOrderKeyMessage = "QueryPage requires request.OrderKey or at least one field to order by";
     private static readonly VersionConflictReason = "version mismatch";
     private static readonly AtomicUnsupportedReason = "atomic write not supported by this connector";
+    private static readonly OptimisticUnsupportedReason = "optimistic write not supported by this connector (its session cannot read versions)";
 
     private static readonly NetworkErrorNames: ReadonlySet<string> = new Set(["MongoNetworkError", "MongoServerSelectionError", "MongoNetworkTimeoutError"]);
     private static readonly TransientLabels: ReadonlySet<string> = new Set(["RetryableWriteError", "ResumableChangeStreamError"]);
@@ -21,10 +22,10 @@ export class DocumentAdapter implements IDataSourceAdapter
     {
     }
 
-    /** Whether this adapter can enforce an optimistic version guard: always, via {@link IDocumentSession.ReadVersionState}. */
+    /** Whether this adapter can enforce an optimistic version guard: iff its session can {@link IDocumentSession.ReadVersionState}. */
     public get CanVersion(): boolean
     {
-        return true;
+        return this.session.ReadVersionState !== undefined;
     }
 
     /** Whether this adapter supports keyset paging: always, via a sorted, limited, `$gt`-seeked Find. */
@@ -116,6 +117,11 @@ export class DocumentAdapter implements IDataSourceAdapter
                 DocumentIdentifier.Validate(field);
             }
         }
+        if (batch.Concurrency === WriteConcurrency.Optimistic && !WriteCapability.CanVersion(this))
+        {
+            // Fail closed: a session that cannot probe versions must never run an Optimistic batch unguarded.
+            return DocumentAdapter.AllFailures(batch, WriteFailureKind.Unsupported, DocumentAdapter.OptimisticUnsupportedReason);
+        }
         if (batch.Atomicity === WriteAtomicity.Transactional)
         {
             return this.ApplyTransactional(batch);
@@ -161,14 +167,7 @@ export class DocumentAdapter implements IDataSourceAdapter
     {
         if (!WriteCapability.CanTransact(this))
         {
-            return {
-                Applied: 0,
-                Failures: batch.Operations.map(op => ({
-                    Key: op.Key,
-                    Kind: WriteFailureKind.Unsupported,
-                    Reason: DocumentAdapter.AtomicUnsupportedReason,
-                })),
-            };
+            return DocumentAdapter.AllFailures(batch, WriteFailureKind.Unsupported, DocumentAdapter.AtomicUnsupportedReason);
         }
         try
         {
@@ -217,9 +216,11 @@ export class DocumentAdapter implements IDataSourceAdapter
         {
             if (op.Kind === WriteOperationKind.Delete)
             {
-                // Delete is unconditional in v1: no version guard.
-                await session.Delete(batch.Source, batch.IdKey, op.Key);
-                return undefined;
+                if (await this.ApplyDelete(session, batch, op))
+                {
+                    return undefined;
+                }
+                return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: DocumentAdapter.VersionConflictReason };
             }
             if (await this.ApplyUpsert(session, batch, op))
             {
@@ -233,12 +234,36 @@ export class DocumentAdapter implements IDataSourceAdapter
         }
     }
 
+    /**
+     * Runs one delete against the given session; returns false when a version-guarded delete must not apply.
+     * An Optimistic delete probes ReadVersionState first: a present document whose stored version is null, differs
+     * from op.Version, or is deleted with a null op.Version is a Conflict (fail-closed); an absent document has
+     * nothing to delete.
+     */
+    private async ApplyDelete(session: IDocumentSession, batch: WriteBatch, op: WriteOperation): Promise<boolean>
+    {
+        if (batch.Concurrency === WriteConcurrency.Optimistic && batch.VersionField !== undefined)
+        {
+            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key, batch.VersionField);
+            if (state.Exists)
+            {
+                const incoming = op.Version ?? null;
+                if (state.Version === null || incoming === null || state.Version !== incoming)
+                {
+                    return false;
+                }
+            }
+        }
+        await session.Delete(batch.Source, batch.IdKey, op.Key);
+        return true;
+    }
+
     /** Runs one upsert against the given session; returns false when a version-guarded upsert must not apply. */
     private async ApplyUpsert(session: IDocumentSession, batch: WriteBatch, op: WriteOperation): Promise<boolean>
     {
         if (batch.Concurrency === WriteConcurrency.Optimistic && batch.VersionField !== undefined)
         {
-            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key);
+            const state = await session.ReadVersionState!(batch.Source, batch.IdKey, op.Key, batch.VersionField);
             if (state.Exists)
             {
                 // Apply only when a present row's stored version matches op.Version with BOTH non-null.
@@ -255,6 +280,12 @@ export class DocumentAdapter implements IDataSourceAdapter
         // LastWriteWins (or an absent/matching optimistic row): unconditional upsert, incoming overwrites.
         await session.Upsert(batch.Source, batch.IdKey, op.Key, { ...op.Fields, [batch.IdKey]: op.Key });
         return true;
+    }
+
+    /** Every op of the batch failed with the same kind and reason; nothing applied. */
+    private static AllFailures(batch: WriteBatch, kind: WriteFailureKind, reason: string): WriteResult
+    {
+        return { Applied: 0, Failures: batch.Operations.map(op => ({ Key: op.Key, Kind: kind, Reason: reason })) };
     }
 
     private static ErrorReason(error: unknown): string

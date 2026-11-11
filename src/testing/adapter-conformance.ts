@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
+import type { IDataSourceAdapter, WriteBatch } from "@pragmatic-tech-ai/todl";
 
 const Customer = "Customer";
 const UnknownSource = "Nope";
@@ -15,6 +15,8 @@ const NewLabel = "Globex";
 const ThirdId = "c3";
 const ThirdLabel = "Initech";
 const UpdatedLabel = "Acme 2";
+const CurrentVersion = "2";
+const StaleVersion = "1";
 
 /** Per-fixture fidelity knobs for a conformance run (the backing store's limitations, not the adapter's). */
 export interface AdapterConformanceOptions
@@ -27,6 +29,12 @@ export interface AdapterConformanceOptions
      * reports 0 correctly, so it leaves this at the default and exercises the version cases for real.
      */
     readonly HonorsVersionGuard?: boolean;
+    /**
+     * Whether the adapter guards an Optimistic Delete with the op's Version (a stale version is a Conflict and
+     * the record stays). Defaults true. The SQL registrations set this false: the SQL adapter lives in TODL and
+     * its delete is not yet version-guarded there (TODL side of G1).
+     */
+    readonly GuardsVersionedDelete?: boolean;
 }
 
 /**
@@ -134,6 +142,45 @@ export function describeDataSourceAdapter(name: string, make: () => IDataSourceA
             assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Conflict);
             const rows = await adapter.Query({ Source: Customer, Fields: [IdKey, Label] });
             assert.deepEqual(rows, [{ [IdKey]: SeedId, [Label]: SeedLabel }]);
+        });
+    }
+
+    // CanVersion: an Optimistic Delete is guarded by op.Version. A stale version is a Conflict and the record stays;
+    // the current version deletes it. The record is first given a known version via a LastWriteWins upsert.
+    if (canVerifyVersionGuard && (options?.GuardsVersionedDelete ?? true))
+    {
+        const OptimisticDelete = (version: string): WriteBatch => ({
+            Source: Customer, IdKey, VersionField, Concurrency: WriteConcurrency.Optimistic, Atomicity: WriteAtomicity.Sequential,
+            Operations: [{ Kind: WriteOperationKind.Delete, Key: SeedId, Fields: {}, Version: version }],
+        });
+        const SeedVersioned = async (adapter: IDataSourceAdapter): Promise<void> =>
+        {
+            await adapter.Apply({
+                Source: Customer, IdKey, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+                Operations: [{ Kind: WriteOperationKind.Upsert, Key: SeedId, Fields: { [VersionField]: CurrentVersion } }],
+            });
+        };
+
+        test(`${name}: optimistic delete with a stale version conflicts`, async () =>
+        {
+            const adapter = make();
+            await SeedVersioned(adapter);
+            const result = await adapter.Apply(OptimisticDelete(StaleVersion));
+            assert.equal(result.Applied, 0);
+            assert.equal(result.Failures.length, 1);
+            assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Conflict);
+            const rows = await adapter.Query({ Source: Customer, Fields: [IdKey] });
+            assert.deepEqual(rows, [{ [IdKey]: SeedId }]);
+        });
+
+        test(`${name}: optimistic delete with the current version deletes`, async () =>
+        {
+            const adapter = make();
+            await SeedVersioned(adapter);
+            const result = await adapter.Apply(OptimisticDelete(CurrentVersion));
+            assert.equal(result.Applied, 1);
+            assert.equal(result.Failures.length, 0);
+            assert.deepEqual(await adapter.Query({ Source: Customer, Fields: [IdKey] }), []);
         });
     }
 

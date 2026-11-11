@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import { DocumentAdapter } from "../document-adapter.js";
+import type { DocumentFindOptions, IDocumentSession } from "../document-session.js";
 import { FakeDocumentSession, TransactionalFakeDocumentSession } from "../../testing/fake-document-session.js";
 import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
 
@@ -264,4 +265,37 @@ test("QueryPage rejects a non-positive or non-integer Limit and an absent order 
     await assert.rejects(adapter.QueryPage(PagingFixture.Request(), { Limit: 0 }), /positive integer/);
     await assert.rejects(adapter.QueryPage(PagingFixture.Request(), { Limit: 1.5 }), /positive integer/);
     await assert.rejects(adapter.QueryPage({ Source: DocumentFixture.Collection, Fields: [] }, { Limit: 1 }), /order/);
+});
+
+/** A session that cannot probe versions (no ReadVersionState), like a store without per-record versions. */
+class UnversionedDocumentSession implements IDocumentSession
+{
+    private readonly inner = new FakeDocumentSession();
+
+    public Find(collection: string, filter: Record<string, unknown>, options?: DocumentFindOptions): Promise<readonly Record<string, unknown>[]>
+    {
+        return this.inner.Find(collection, filter, options);
+    }
+
+    public Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>
+    {
+        return this.inner.Upsert(collection, idField, key, doc);
+    }
+
+    public Delete(collection: string, idField: string, key: unknown): Promise<boolean>
+    {
+        return this.inner.Delete(collection, idField, key);
+    }
+}
+
+test("over a session without ReadVersionState, CanVersion is false and an optimistic batch is Unsupported, not thrown", async () =>
+{
+    const adapter = new DocumentAdapter(new UnversionedDocumentSession());
+    assert.equal(adapter.CanVersion, false);
+    const result = await adapter.Apply({ Source: DocumentFixture.Collection, IdKey: DocumentFixture.IdField, VersionField: DocumentFixture.Rev,
+        Concurrency: WriteConcurrency.Optimistic, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Delete, Key: "c1", Fields: {}, Version: "v1" }] });
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Unsupported);
 });

@@ -10,7 +10,6 @@ import type { DocumentFindOptions, IDocumentSession, VersionState } from "../doc
  */
 export class FakeDocumentSession implements IDocumentSession
 {
-    private static readonly VersionProperty = "rev";
     private static readonly IdProperty = "id";
 
     protected readonly store = new Map<string, Map<string, Record<string, unknown>>>();
@@ -53,14 +52,15 @@ export class FakeDocumentSession implements IDocumentSession
         return this.store.get(collection)?.delete(String(key)) ?? false;
     }
 
-    public async ReadVersionState(source: string, _idKey: string, key: ExternalFieldValue): Promise<VersionState>
+    /** Reads the version from the caller's versionField, as the Mongo session does (no hard-coded field to mask a drift). */
+    public async ReadVersionState(source: string, _idKey: string, key: ExternalFieldValue, versionField: string): Promise<VersionState>
     {
         const doc = this.store.get(source)?.get(String(key));
         if (doc === undefined)
         {
             return { Exists: false };
         }
-        return { Exists: true, Version: (doc[FakeDocumentSession.VersionProperty] ?? null) as ExternalFieldValue | null };
+        return { Exists: true, Version: (doc[versionField] ?? null) as ExternalFieldValue | null };
     }
 
     /** Ascending order with nulls first; a null never compares greater, so a strict seek drops it. */

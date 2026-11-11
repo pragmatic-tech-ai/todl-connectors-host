@@ -189,11 +189,27 @@ export class RestAdapter implements IDataSourceAdapter
         }
     }
 
-    /** DELETE a resource; a 404 is tolerated as already absent. No version guard on delete in v1. */
+    /**
+     * DELETE a resource; a 404 is tolerated as already absent. LastWriteWins deletes unconditionally. Optimistic
+     * is fail-closed like PUT: a missing op.Version is a Conflict with NO request issued, and a present version
+     * is sent as If-Match so a stale delete maps to 412/409 -> Conflict.
+     */
     private async ApplyDelete(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
     {
-        const response = await this.client.Send(
-            RestHttpMethod.Delete, this.ResourceUrl(batch.Source, op.Key), this.connection.headers);
+        const headers = { ...this.connection.headers };
+        if (batch.Concurrency === WriteConcurrency.Optimistic)
+        {
+            if (op.Version === undefined || op.Version === null)
+            {
+                return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: RestAdapter.UnversionedConflictReason };
+            }
+            headers[RestAdapter.IfMatchHeader] = String(op.Version);
+        }
+        const response = await this.client.Send(RestHttpMethod.Delete, this.ResourceUrl(batch.Source, op.Key), headers);
+        if (RestAdapter.IsVersionConflict(response.Status))
+        {
+            return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: RestAdapter.VersionConflictReason };
+        }
         if (response.Status === RestAdapter.NotFoundStatus) return undefined;
         RestAdapter.EnsureSuccess(response.Status);
         return undefined;
