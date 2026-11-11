@@ -14,20 +14,14 @@ class PgConformanceNames
     public static readonly Live = "PgSql (live)";
 }
 
-/** Conformance options for the SQL registrations: the SQL adapter is TODL's, and its delete is not yet version-guarded there. */
-class SqlDeleteOptions
-{
-    public static readonly Unguarded = { GuardsVersionedDelete: false };
-}
-
 // OFFLINE: real SQL execution via pg-mem. Always runs. pg-mem cannot honor the optimistic version guard
 // (its ON CONFLICT DO UPDATE ... WHERE command tag mis-reports the affected-row count), so the version-
 // guard cases are opted out here; the gated live conformance below exercises them against real Postgres.
-describeDataSourceAdapter(PgConformanceNames.PgMem, () => PgMemAdapterHarness.Make(), { HonorsVersionGuard: false, ...SqlDeleteOptions.Unguarded });
+describeDataSourceAdapter(PgConformanceNames.PgMem, () => PgMemAdapterHarness.Make(), { HonorsVersionGuard: false });
 
 // OFFLINE, version-faithful: pg-mem with the guarded upsert's affected-row count and rollback made Postgres-like
 // (PgMemFaithfulSession), so the version-guard cases (fail-closed, transactional rollback on conflict) run offline too.
-describeDataSourceAdapter(PgConformanceNames.FaithfulPgMem, () => PgMemAdapterHarness.MakeVersionFaithful(), SqlDeleteOptions.Unguarded);
+describeDataSourceAdapter(PgConformanceNames.FaithfulPgMem, () => PgMemAdapterHarness.MakeVersionFaithful());
 
 /** A versioned row and a stale write against it, for the version-faithful pg-mem session. */
 class StaleVersionFixture
@@ -75,7 +69,7 @@ test(StaleVersionFixture.Title, async () =>
 // non-empty, so unset/empty => zero live tests. Pools connect lazily; connection errors surface on first use.
 if ((process.env[LiveEnvVar] ?? "") !== "")
 {
-    describeDataSourceAdapter(PgConformanceNames.Live, () => PgLiveHarness.Make(process.env[LiveEnvVar]!), SqlDeleteOptions.Unguarded);
+    describeDataSourceAdapter(PgConformanceNames.Live, () => PgLiveHarness.Make(process.env[LiveEnvVar]!));
     after(async () =>
     {
         await PgLiveHarness.DisposeAll();
