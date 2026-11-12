@@ -41,7 +41,11 @@ export class FakeRestHttpClient implements IRestHttpClient
     }
 
     /** Choose how a POST insert reports its source-assigned key (body id, Location header, or neither). */
-    public WithInsertKeyMode(mode: RestInsertKeyMode): this { this.insertKeyMode = mode; return this; }
+    public WithInsertKeyMode(mode: RestInsertKeyMode): this
+    {
+        this.insertKeyMode = mode;
+        return this;
+    }
 
     public Seed(source: string, records: Record<string, unknown>[]): this
     {

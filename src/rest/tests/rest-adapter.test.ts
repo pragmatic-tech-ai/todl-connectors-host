@@ -111,7 +111,18 @@ test("REST advertises CanAssignKeys", () =>
     assert.equal(RestInsertFixture.Make().CanAssignKeys, true);
 });
 
-test("rest insert reports the row version from the ETag header", async () =>
+test("rest insert reports the row version from the ETag header when a version field is configured", async () =>
+{
+    const client = { GetJson: async () => [], Send: async () => ({ Status: 201, Body: { id: "7" }, Headers: { ETag: "v9" } }) };
+    const adapter = new RestAdapter(client, RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    const result = await adapter.Apply({
+        Source: Orders, IdKey: "id", VersionField: "rev", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: {} }],
+    });
+    assert.deepEqual(result.Assigned, [{ Ref: "r1", Key: "7", Version: "v9" }]);
+});
+
+test("rest insert omits the ETag version when no version field is configured", async () =>
 {
     const client = { GetJson: async () => [], Send: async () => ({ Status: 201, Body: { id: "7" }, Headers: { ETag: "v9" } }) };
     const adapter = new RestAdapter(client, RestConnectionConfig.From({ baseUrl: BaseUrl }));
@@ -119,7 +130,7 @@ test("rest insert reports the row version from the ETag header", async () =>
         Source: Orders, IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
         Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: {} }],
     });
-    assert.deepEqual(result.Assigned, [{ Ref: "r1", Key: "7", Version: "v9" }]);
+    assert.deepEqual(result.Assigned, [{ Ref: "r1", Key: "7" }]);
 });
 
 test("RestConnectionConfig turns a secret into a bearer header, not a url", () =>

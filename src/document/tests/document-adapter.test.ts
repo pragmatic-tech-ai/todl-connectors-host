@@ -30,6 +30,23 @@ describeDataSourceAdapter("DocumentAdapter (fake session)", () => DocumentFixtur
 const Events = "events";
 const MongoId = "_id";
 
+/** A fake session that hands its assigned _ids out in DESCENDING order, so the id-value order is the reverse of the
+ *  request order -- used to prove the adapter correlates each insert to its Ref, not to the outcome's position or key. */
+class ReorderingInsertSession extends FakeDocumentSession
+{
+    private static readonly IdPrefix = "evt-";
+    private next = 9;
+
+    public override async Insert(collection: string, doc: Record<string, unknown>): Promise<unknown>
+    {
+        const id = ReorderingInsertSession.IdPrefix + String(this.next--);
+        const bucket = this.store.get(collection) ?? new Map<string, Record<string, unknown>>();
+        this.store.set(collection, bucket);
+        bucket.set(id, { ...doc, [MongoId]: id });
+        return id;
+    }
+}
+
 describeInsertingAdapter("DocumentAdapter (fake session)", () => new DocumentAdapter(new FakeDocumentSession()),
     { Source: Events, IdKey: MongoId, FailFields: { [FakeDocumentSession.FailField]: "1" } });
 
@@ -55,9 +72,9 @@ test("mongo insert needs the _id key: any other id key is Unsupported, nothing a
     assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Unsupported);
 });
 
-test("bulk insert correlates by ref: each ref gets its own distinct assigned _id", async () =>
+test("bulk insert correlates by ref even when the source returns its assigned ids reordered", async () =>
 {
-    const adapter = new DocumentAdapter(new FakeDocumentSession());
+    const adapter = new DocumentAdapter(new ReorderingInsertSession());
     const result = await adapter.Apply({
         Source: Events, IdKey: MongoId, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
         Operations: [
@@ -66,9 +83,19 @@ test("bulk insert correlates by ref: each ref gets its own distinct assigned _id
             { Kind: WriteOperationKind.Insert, Key: null, Ref: "r3", Fields: { [DocumentFixture.Label]: "c" } }],
     });
     assert.equal(result.Applied, 3);
+    // Source of truth: each stored doc's label -> its assigned _id, read back from the collection.
+    const stored = await adapter.Query({ Source: Events, Fields: [MongoId, DocumentFixture.Label] });
+    const idByLabel = new Map(stored.map(d => [d[DocumentFixture.Label], d[MongoId]]));
     const byRef = new Map(result.Assigned!.map(a => [a.Ref, a.Key]));
-    assert.deepEqual([...byRef.keys()].sort(), ["r1", "r2", "r3"]);
     assert.equal(new Set(byRef.values()).size, 3);
+    // Each Ref correlates to its OWN doc's assigned _id.
+    assert.equal(byRef.get("r1"), idByLabel.get("a"));
+    assert.equal(byRef.get("r2"), idByLabel.get("b"));
+    assert.equal(byRef.get("r3"), idByLabel.get("c"));
+    // The source handed ids out in REVERSE of request order, so ordering the outcomes by Key gives the reverse of
+    // the requests -- a position/key-based correlation would mis-assign; only keying by Ref is correct.
+    const byKeyAscending = [...result.Assigned!].sort((a, b) => (String(a.Key) < String(b.Key) ? -1 : 1)).map(a => a.Ref);
+    assert.deepEqual(byKeyAscending, ["r3", "r2", "r1"]);
 });
 
 test("an ObjectId assigned _id is reported as its hex string", async () =>

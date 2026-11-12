@@ -231,7 +231,9 @@ export class RestAdapter implements IDataSourceAdapter
         {
             return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: RestAdapter.KeyNotReturnedReason } };
         }
-        const version = RestAdapter.Header(response, RestAdapter.ETagHeader);
+        // Surface the ETag-derived version only when the batch declares a version field (as the Cypher / GraphQL
+        // adapters gate theirs on batch.VersionField); an unversioned binding reports just the key.
+        const version = batch.VersionField === undefined ? undefined : RestAdapter.Header(response, RestAdapter.ETagHeader);
         return { Assigned: version === undefined ? { Ref: op.Ref!, Key: key } : { Ref: op.Ref!, Key: key, Version: version } };
     }
 

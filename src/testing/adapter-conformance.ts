@@ -250,7 +250,9 @@ export interface InsertingAdapterOptions
  * a null Key; the source assigns the key, reported back in WriteResult.Assigned keyed by Ref. W20 (adapter compensation):
  * a mid-batch failure in a Sequential batch reports the failed op and still returns the applied rows' keys, so an
  * already-applied insert is never orphaned.
- * This is a sanctioned module-level test-contract helper, a sibling of describeDataSourceAdapter.
+ * Shape follows the sanctioned sibling describeDataSourceAdapter exactly: a module-level describe-helper function (the
+ * established test-harness pattern here, not a class), with its fixture helpers (Insert / Batch) as function-local
+ * arrows like that sibling's own, and reusing the sibling's module-level fixture consts.
  */
 export function describeInsertingAdapter(name: string, make: () => IDataSourceAdapter, options: InsertingAdapterOptions): void
 {
