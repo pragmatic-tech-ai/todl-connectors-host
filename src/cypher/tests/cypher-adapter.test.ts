@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import type { QueryRequest } from "@pragmatic-tech-ai/todl";
 import { CypherAdapter } from "../cypher-adapter.js";
-import { FakeCypherSession, TransactionalFakeCypherSession } from "../../testing/fake-cypher-session.js";
-import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
+import { FakeCypherSession, FilteringFakeCypherSession, TransactionalFakeCypherSession } from "../../testing/fake-cypher-session.js";
+import { describeDataSourceAdapter, describeInsertingAdapter } from "../../testing/adapter-conformance.js";
 
 class CypherFixture
 {
@@ -33,6 +33,36 @@ class CypherFixture
 
 describeDataSourceAdapter("CypherAdapter (fake session)", () => CypherFixture.Make());
 describeDataSourceAdapter("CypherAdapter (transactional fake session)", () => CypherFixture.MakeTransactional());
+
+const EventLabel = "Event";
+const UuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+describeInsertingAdapter("CypherAdapter (fake session)", () => new CypherAdapter(new FakeCypherSession()),
+    { Source: EventLabel, FailFields: { [FakeCypherSession.FailField]: "1" } });
+
+test("cypher advertises CanAssignKeys", () =>
+{
+    assert.equal(new CypherAdapter(new FakeCypherSession()).CanAssignKeys, true);
+});
+
+test("cypher insert assigns a uuid property, and a MATCH by that key finds the node", async () =>
+{
+    const adapter = new CypherAdapter(new FilteringFakeCypherSession());
+    const result = await adapter.Apply({
+        Source: EventLabel, IdKey: CypherFixture.IdKey, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { label: "a" } }],
+    });
+    assert.equal(result.Applied, 1);
+    const key = result.Assigned![0]!.Key;
+    assert.equal(result.Assigned![0]!.Ref, "r1");
+    assert.match(String(key), UuidPattern);
+    const rows = await adapter.Query({
+        Source: EventLabel, Fields: [CypherFixture.IdKey, "label"],
+        Where: { All: [{ Field: CypherFixture.IdKey, Op: QueryCompareOp.Eq, Value: key }] },
+    });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]![CypherFixture.IdKey], key);
+});
 
 test("CanVersion is advertised, and CanTransact tracks whether the session can transact", () =>
 {

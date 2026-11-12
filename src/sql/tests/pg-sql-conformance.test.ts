@@ -1,7 +1,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
+import { describeDataSourceAdapter, describeInsertingAdapter } from "../../testing/adapter-conformance.js";
 import { PgLiveHarness, PgMemAdapterHarness } from "../../testing/pg-mem-adapter.js";
 
 const LiveEnvVar = "CONNECTORS_LIVE_PG";
@@ -22,6 +22,11 @@ describeDataSourceAdapter(PgConformanceNames.PgMem, () => PgMemAdapterHarness.Ma
 // OFFLINE, version-faithful: pg-mem with the guarded upsert's affected-row count and rollback made Postgres-like
 // (PgMemFaithfulSession), so the version-guard cases (fail-closed, transactional rollback on conflict) run offline too.
 describeDataSourceAdapter(PgConformanceNames.FaithfulPgMem, () => PgMemAdapterHarness.MakeVersionFaithful());
+
+// OFFLINE: source-keyed inserts against a real serial-keyed pg-mem table (the DB assigns id). A bad column makes the
+// mid-batch op fail (Error), exercising the W20 no-orphan contract on a Sequential batch.
+describeInsertingAdapter(PgConformanceNames.PgMem, () => PgMemAdapterHarness.MakeInserting(),
+    { Source: PgMemAdapterHarness.InsertTable, GoodFields: { label: "ok" }, FailFields: { nope: "x" }, ExpectedFailKind: WriteFailureKind.Error });
 
 /** A versioned row and a stale write against it, for the version-faithful pg-mem session. */
 class StaleVersionFixture

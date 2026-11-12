@@ -10,7 +10,7 @@ class FakeFetch
     {
         return (async () =>
         {
-            return { ok: false, status, json: async () => { throw new SyntaxError("not json"); } } as unknown as Response;
+            return { ok: false, status, headers: new Headers(), json: async () => { throw new SyntaxError("not json"); } } as unknown as Response;
         }) as unknown as typeof fetch;
     }
 
@@ -32,6 +32,7 @@ class FakeFetch
             return {
                 ok: status >= 200 && status < 300,
                 status,
+                headers: new Headers(),
                 json: async () => body,
             } as Response;
         }) as unknown as typeof fetch;
@@ -83,7 +84,7 @@ test("Send resolves with undefined Body for a non-JSON response", async () =>
 {
     const client = new FetchRestHttpClient({ fetch: FakeFetch.CreateNonJson(502) });
     const res = await client.Send(RestHttpMethod.Post, "https://api.example/x", {}, { a: 1 });
-    assert.deepEqual(res, { Status: 502, Body: undefined });
+    assert.deepEqual(res, { Status: 502, Body: undefined, Headers: {} });
 });
 
 test("allows plain http to 127.0.0.1", async () =>

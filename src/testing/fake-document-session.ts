@@ -10,7 +10,11 @@ import type { DocumentFindOptions, IDocumentSession, VersionState } from "../doc
  */
 export class FakeDocumentSession implements IDocumentSession
 {
+    public static readonly FailField = "__fail";
     private static readonly IdProperty = "id";
+    private static readonly MongoIdProperty = "_id";
+    private static readonly InsertFailMessage = "document insert rejected";
+    private nextInsertId = 0;
 
     protected readonly store = new Map<string, Map<string, Record<string, unknown>>>();
 
@@ -50,6 +54,23 @@ export class FakeDocumentSession implements IDocumentSession
     public async Delete(collection: string, _idField: string, key: unknown): Promise<boolean>
     {
         return this.store.get(collection)?.delete(String(key)) ?? false;
+    }
+
+    /**
+     * Inserts a document and returns an ObjectId-like assigned `_id` (an object with toHexString, as the Mongo driver
+     * returns), stored under that hex key. A FailField marker throws, as a driver fault would.
+     */
+    public async Insert(collection: string, doc: Record<string, unknown>): Promise<unknown>
+    {
+        if (FakeDocumentSession.FailField in doc)
+        {
+            throw new Error(FakeDocumentSession.InsertFailMessage);
+        }
+        const hex = (++this.nextInsertId).toString(16).padStart(24, "0");
+        const bucket = this.store.get(collection) ?? new Map<string, Record<string, unknown>>();
+        this.store.set(collection, bucket);
+        bucket.set(hex, { ...doc, [FakeDocumentSession.MongoIdProperty]: hex });
+        return { toHexString: () => hex };
     }
 
     /** Reads the version from the caller's versionField, as the Mongo session does (no hard-coded field to mask a drift). */

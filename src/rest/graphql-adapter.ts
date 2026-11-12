@@ -1,6 +1,6 @@
 import { ConnectionFailureKind, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
 import { DeclaredFilters, type PushedFilter } from "./declared-filters.js";
-import type { ExternalFieldValue, ExternalRecord, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, IAssignedKey, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { JsonPath } from "./json-path.js";
@@ -67,6 +67,10 @@ export interface GraphQlConnection
     readonly upsertMutation?: string;
     readonly upsertInputType: string;
     readonly upsertInputArg: string;
+    /** Source-keyed insert mutation; its presence gates CanAssignKeys. */
+    readonly insertMutation?: string;
+    readonly insertInputType: string;
+    readonly insertInputArg: string;
     /** Fields selected back from the upsert payload; undefined means "default to the batch IdKey". */
     readonly upsertReturn?: readonly string[];
     readonly deleteMutation?: string;
@@ -94,6 +98,10 @@ export class GraphQlConnectionConfig
     private static readonly UpsertMutationKey = "upsertMutation";
     private static readonly UpsertInputTypeKey = "upsertInputType";
     private static readonly UpsertInputArgKey = "upsertInputArg";
+    private static readonly InsertMutationKey = "insertMutation";
+    private static readonly InsertInputTypeKey = "insertInputType";
+    private static readonly InsertInputArgKey = "insertInputArg";
+    private static readonly DefaultInsertInputType = "JSON!";
     private static readonly UpsertReturnKey = "upsertReturn";
     private static readonly DeleteMutationKey = "deleteMutation";
     private static readonly DeleteIdTypeKey = "deleteIdType";
@@ -146,6 +154,10 @@ export class GraphQlConnectionConfig
         }
         const upsert = config[GraphQlConnectionConfig.UpsertMutationKey];
         const del = config[GraphQlConnectionConfig.DeleteMutationKey];
+        const insert = config[GraphQlConnectionConfig.InsertMutationKey];
+        // insertInputType may carry a `!` (its JSON! default) so it is a GraphQL TYPE, not a bare identifier.
+        const insertInputType = GraphQlConnectionConfig.ValidateType(config[GraphQlConnectionConfig.InsertInputTypeKey] ?? GraphQlConnectionConfig.DefaultInsertInputType);
+        const insertInputArg = GraphQlName.Validate(config[GraphQlConnectionConfig.InsertInputArgKey] ?? GraphQlConnectionConfig.DefaultUpsertInputArg);
         const upsertInputType = GraphQlName.Validate(config[GraphQlConnectionConfig.UpsertInputTypeKey] ?? GraphQlConnectionConfig.DefaultUpsertInputType);
         const upsertInputArg = GraphQlName.Validate(config[GraphQlConnectionConfig.UpsertInputArgKey] ?? GraphQlConnectionConfig.DefaultUpsertInputArg);
         const deleteIdType = GraphQlName.Validate(config[GraphQlConnectionConfig.DeleteIdTypeKey] ?? GraphQlConnectionConfig.DefaultDeleteIdType);
@@ -167,9 +179,11 @@ export class GraphQlConnectionConfig
         return {
             endpoint, headers, source, queryField,
             upsertInputType, upsertInputArg, deleteIdType, deleteIdArg,
+            insertInputType, insertInputArg,
             errorConflictCodes, errorUnsupportedCodes,
             ...(upsert !== undefined ? { upsertMutation: GraphQlName.Validate(upsert) } : {}),
             ...(del !== undefined ? { deleteMutation: GraphQlName.Validate(del) } : {}),
+            ...(insert !== undefined ? { insertMutation: GraphQlName.Validate(insert) } : {}),
             ...(upsertReturn !== undefined ? { upsertReturn } : {}),
             ...(paging !== undefined ? { paging } : {}),
             ...(filters.IsEmpty ? {} : { filters }),
@@ -297,10 +311,19 @@ export class GraphQlName
     }
 }
 
+/** The result of applying one GraphQL op: a failure, or the source-assigned key of an insert; both absent means a plain success. */
+interface IGraphQlOpOutcome
+{
+    readonly Failure?: WriteFailure;
+    readonly Assigned?: IAssignedKey;
+}
+
 /** GraphQL adapter: read via a configured query field, write via configured mutations. Where re-applied in-adapter. */
 export class GraphQlAdapter implements IDataSourceAdapter
 {
     private static readonly WriteNotConfiguredReason = "graphql write not configured";
+    private static readonly InsertNotConfiguredReason = "graphql insert not configured (no insertMutation)";
+    private static readonly InsertKeyNotReturnedReason = "graphql insert returned no key";
     private static readonly OptimisticUnsupportedReason = "optimistic write not supported by this connector (graphql cannot version)";
     private static readonly WrongSourceReason = "write batch source does not match the connector's configured source";
     private static readonly ReturnedIdMismatchReason = "graphql mutation returned a different id than the one written";
@@ -388,6 +411,12 @@ export class GraphQlAdapter implements IDataSourceAdapter
         return false;
     }
 
+    /** Whether this adapter can execute source-keyed inserts: only when the connection declares an insert mutation. */
+    public get CanAssignKeys(): boolean
+    {
+        return this.connection.insertMutation !== undefined;
+    }
+
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
     {
         if (request.Source !== this.connection.source) return [];
@@ -454,19 +483,26 @@ export class GraphQlAdapter implements IDataSourceAdapter
         GraphQlName.Validate(batch.IdKey);
         let applied = 0;
         const failures: WriteFailure[] = [];
+        const assigned: IAssignedKey[] = [];
         for (const op of batch.Operations)
         {
-            const failure = await this.ApplyOne(batch, op);
-            if (failure === undefined)
+            const outcome = await this.ApplyOne(batch, op);
+            if (outcome.Failure !== undefined)
             {
-                applied++;
+                failures.push(outcome.Failure);
             }
             else
             {
-                failures.push(failure);
+                applied++;
+                if (outcome.Assigned !== undefined)
+                {
+                    assigned.push(outcome.Assigned);
+                }
             }
         }
-        return { Applied: applied, Failures: failures };
+        // W20: each applied insert's key is reported under its Ref and the loop returns normally (ApplyOne catches
+        // every per-op throw), so a mid-batch failure never orphans the mutations that already applied.
+        return assigned.length === 0 ? { Applied: applied, Failures: failures } : { Applied: applied, Failures: failures, Assigned: assigned };
     }
 
     public async Dispose(): Promise<void>
@@ -485,20 +521,65 @@ export class GraphQlAdapter implements IDataSourceAdapter
      * Applies one op resiliently: a not-configured mutation is Unsupported (the capability is absent),
      * a thrown driver/transport fault is Error, success returns undefined.
      */
-    private async ApplyOne(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
+    private async ApplyOne(batch: WriteBatch, op: WriteOperation): Promise<IGraphQlOpOutcome>
     {
         try
         {
-            if (op.Kind === WriteOperationKind.Delete)
+            if (op.Kind === WriteOperationKind.Insert)
             {
-                return await this.ApplyDelete(batch, op);
+                return await this.ApplyInsert(batch, op);
             }
-            return await this.ApplyUpsert(batch, op);
+            const failure = op.Kind === WriteOperationKind.Delete
+                ? await this.ApplyDelete(batch, op)
+                : await this.ApplyUpsert(batch, op);
+            return failure === undefined ? {} : { Failure: failure };
         }
         catch (error)
         {
-            return { Key: op.Key, Kind: WriteFailureKind.Error, Reason: GraphQlAdapter.ErrorReason(error) };
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: GraphQlAdapter.ErrorReason(error) } };
         }
+    }
+
+    /**
+     * Runs one source-keyed insert through the configured insertMutation: `mutation($input: <insertInputType>){
+     * <insertMutation>(<insertInputArg>: $input){ <IdKey> [<VersionField>] } }`, with the op's Fields as the input.
+     * The key comes from `data.<insertMutation>.<IdKey>` (its absence is an Error failure); the version from the
+     * version field when the batch declares one.
+     */
+    private async ApplyInsert(batch: WriteBatch, op: WriteOperation): Promise<IGraphQlOpOutcome>
+    {
+        const mutation = this.connection.insertMutation;
+        if (mutation === undefined)
+        {
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: GraphQlAdapter.InsertNotConfiguredReason } };
+        }
+        const returnFields = [GraphQlName.Validate(batch.IdKey), ...(batch.VersionField === undefined ? [] : [GraphQlName.Validate(batch.VersionField)])];
+        const arg = this.connection.insertInputArg;
+        const document = GraphQlAdapter.MutationVarOpen + arg + GraphQlAdapter.VarTypeSeparator + this.connection.insertInputType
+            + GraphQlAdapter.VarsClose + mutation + GraphQlAdapter.ArgOpen + arg + GraphQlAdapter.ArgVarSeparator + arg
+            + GraphQlAdapter.UpsertSelectionOpen + returnFields.join(GraphQlAdapter.FieldSeparator) + GraphQlAdapter.UpsertSelectionClose;
+        const response = await this.client.Send(RestHttpMethod.Post, this.connection.endpoint, this.connection.headers,
+            { [GraphQlAdapter.QueryKey]: document, [GraphQlAdapter.VariablesKey]: { [arg]: op.Fields } });
+        const failure = this.MapResponse(response, mutation, op);
+        if (failure !== undefined) return { Failure: failure };
+        const payload = GraphQlAdapter.MutationPayload(response, mutation);
+        const key = payload?.[batch.IdKey];
+        if (key === undefined || key === null)
+        {
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: GraphQlAdapter.InsertKeyNotReturnedReason } };
+        }
+        const version = batch.VersionField === undefined ? undefined : payload?.[batch.VersionField];
+        return { Assigned: version === undefined || version === null
+            ? { Ref: op.Ref!, Key: key as ExternalFieldValue }
+            : { Ref: op.Ref!, Key: key as ExternalFieldValue, Version: version as ExternalFieldValue } };
+    }
+
+    /** The `data.<mutation>` object of a write response, or undefined when the server returned no payload. */
+    private static MutationPayload(response: RestResponse, mutation: string): Record<string, unknown> | undefined
+    {
+        const data = (response.Body as { data?: unknown } | undefined)?.[GraphQlAdapter.DataKey] as Record<string, unknown> | undefined;
+        const payload = data?.[mutation];
+        return payload === null || payload === undefined ? undefined : payload as Record<string, unknown>;
     }
 
     private async ApplyDelete(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>

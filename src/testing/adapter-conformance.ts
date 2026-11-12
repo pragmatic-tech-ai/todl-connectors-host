@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { IDataSourceAdapter, WriteBatch } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, IDataSourceAdapter, WriteBatch, WriteOperation } from "@pragmatic-tech-ai/todl";
 
 const Customer = "Customer";
 const UnknownSource = "Nope";
@@ -226,4 +226,86 @@ export function describeDataSourceAdapter(name: string, make: () => IDataSourceA
             assert.deepEqual(rows[0], { [IdKey]: SeedId, [Label]: SeedLabel });
         });
     }
+}
+
+/** Fixture knobs for the source-keyed insert conformance (Task 2.7 / W20). */
+export interface InsertingAdapterOptions
+{
+    /** The source (table/endpoint/collection/label) to insert into; it must accept source-keyed inserts. */
+    readonly Source: string;
+    /** The id key the source assigns; defaults to "id" (Mongo passes "_id"). */
+    readonly IdKey?: string;
+    /** The version field the source sets on insert, when the adapter should report it. */
+    readonly VersionField?: string;
+    /** Fields for a good insert; defaults to {} (the source assigns the key regardless). */
+    readonly GoodFields?: Record<string, ExternalFieldValue>;
+    /** Fields that make an insert FAIL in this fixture (a bad column, a programmed transport fault, ...). */
+    readonly FailFields: Record<string, ExternalFieldValue>;
+    /** The kind the fixture's induced failure reports; defaults to Error. */
+    readonly ExpectedFailKind?: WriteFailureKind;
+}
+
+/**
+ * Source-keyed insert contract every insert-capable adapter must satisfy (Task 2.7). Each insert op carries a Ref and
+ * a null Key; the source assigns the key, reported back in WriteResult.Assigned keyed by Ref. W20 (adapter compensation):
+ * a mid-batch failure in a Sequential batch reports the failed op and still returns the applied rows' keys, so an
+ * already-applied insert is never orphaned.
+ * This is a sanctioned module-level test-contract helper, a sibling of describeDataSourceAdapter.
+ */
+export function describeInsertingAdapter(name: string, make: () => IDataSourceAdapter, options: InsertingAdapterOptions): void
+{
+    const idKey = options.IdKey ?? IdKey;
+    const good = options.GoodFields ?? {};
+    const failKind = options.ExpectedFailKind ?? WriteFailureKind.Error;
+    const Insert = (ref: string, fields: Record<string, ExternalFieldValue>): WriteOperation =>
+        ({ Kind: WriteOperationKind.Insert, Key: null, Ref: ref, Fields: fields });
+    const Batch = (ops: readonly WriteOperation[]): WriteBatch =>
+        ({
+            Source: options.Source, IdKey: idKey, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+            ...(options.VersionField !== undefined ? { VersionField: options.VersionField } : {}), Operations: ops,
+        });
+
+    test(`${name}: advertises CanAssignKeys`, () =>
+    {
+        assert.equal(make().CanAssignKeys === true, true);
+    });
+
+    test(`${name}: insert returns one assigned key per ref`, async () =>
+    {
+        const result = await make().Apply(Batch([Insert("r1", good), Insert("r2", good)]));
+        assert.equal(result.Failures.length, 0);
+        assert.equal(result.Applied, 2);
+        assert.ok(result.Assigned !== undefined);
+        const byRef = new Map(result.Assigned!.map(a => [a.Ref, a.Key]));
+        assert.deepEqual([...byRef.keys()].sort(), ["r1", "r2"]);
+        assert.notEqual(byRef.get("r1"), null);
+        assert.notEqual(byRef.get("r2"), null);
+        assert.notEqual(byRef.get("r1"), byRef.get("r2"));
+    });
+
+    test(`${name}: partial bulk insert reports per ref`, async () =>
+    {
+        const result = await make().Apply(Batch([Insert("r1", good), Insert("r2", options.FailFields), Insert("r3", good)]));
+        const assignedRefs = new Set((result.Assigned ?? []).map(a => a.Ref));
+        // Only the applied Refs appear in Assigned; the failed Ref does not.
+        assert.ok(assignedRefs.has("r1"));
+        assert.ok(assignedRefs.has("r3"));
+        assert.ok(!assignedRefs.has("r2"));
+        assert.equal(result.Failures.length, 1);
+        assert.equal(result.Failures[0]!.Kind, failKind);
+        assert.equal(result.Applied, 2);
+    });
+
+    test(`${name}: insert batch with a mid-batch failure reports per-op and does not orphan applied rows`, async () =>
+    {
+        const result = await make().Apply(Batch([Insert("r1", good), Insert("r2", options.FailFields), Insert("r3", good)]));
+        const assignedRefs = new Set((result.Assigned ?? []).map(a => a.Ref));
+        // W20: the rows applied before AND after the failed op keep their assigned keys -- none is orphaned.
+        assert.ok(assignedRefs.has("r1"));
+        assert.ok(assignedRefs.has("r3"));
+        // The mid-batch op is reported as a failure, and every Ref is accounted (applied or failed) -- nothing silently dropped.
+        assert.equal(result.Failures.length, 1);
+        assert.equal(assignedRefs.size + result.Failures.length, 3);
+        assert.equal(result.Applied, 2);
+    });
 }

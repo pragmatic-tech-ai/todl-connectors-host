@@ -11,6 +11,9 @@ export interface RestResponse
 {
     readonly Status: number;
     readonly Body: unknown;
+    /** Response headers (lower-cased by the production client). A source-keyed insert reads the assigned key from
+     *  `Location` (when the body carries no id) and the row's version from `ETag`. Optional so non-write clients keep compiling. */
+    readonly Headers?: Readonly<Record<string, string>>;
 }
 
 /** A paged GET result: the parsed JSON envelope plus the raw Link header (for rel="next" paging). */
@@ -90,7 +93,9 @@ export class FetchRestHttpClient implements IRestHttpClient
         }
         const response = await this.fetchFn(url, init);
         const payload = await response.json().catch(() => undefined);
-        return { Status: response.status, Body: payload };
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+        return { Status: response.status, Body: payload, Headers: responseHeaders };
     }
 
     private static EnforceTransport(url: string): void

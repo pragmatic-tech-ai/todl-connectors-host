@@ -26,6 +26,12 @@ export interface IDocumentSession
     Upsert(collection: string, idField: string, key: unknown, doc: Record<string, unknown>): Promise<void>;
     Delete(collection: string, idField: string, key: unknown): Promise<boolean>;
     /**
+     * Inserts a new document and returns the source-assigned `_id` (a Mongo ObjectId or whatever the driver
+     * minted). Present only on sessions whose store assigns `_id` on insert; its presence gates the adapter's
+     * {@link IDataSourceAdapter.CanAssignKeys}.
+     */
+    Insert?(collection: string, doc: Record<string, unknown>): Promise<unknown>;
+    /**
      * Probes a document's existence and the version stored under versionField in one read (absent vs
      * present-unversioned vs versioned). The field is the batch's {@link WriteBatch.VersionField}, so the
      * probe reads the same field the write path stores (never a separately configured one that can drift).

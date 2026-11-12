@@ -1,5 +1,5 @@
 import { ConnectionFailureKind, QueryCompareOp, RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalFieldValue, ExternalRecord, IDataSourceAdapter, PageQuery, PageSlice, QueryComparison, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, IAssignedKey, IDataSourceAdapter, PageQuery, PageSlice, QueryComparison, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { CypherIdentifier } from "./cypher-identifier.js";
 import type { ICypherSession } from "./cypher-session.js";
@@ -10,6 +10,13 @@ import type { ICypherSession } from "./cypher-session.js";
 type NodeVersionState =
     | { Exists: false }
     | { Exists: true; Version: unknown };
+
+/** The result of applying one Cypher op: a failure, or the source-assigned key of an insert; both absent means a plain success. */
+interface ICypherOpOutcome
+{
+    readonly Failure?: WriteFailure;
+    readonly Assigned?: IAssignedKey;
+}
 
 /** Graph adapter: MATCH to read (Where is pushed to the source and trusted, for Query and QueryPage alike), MERGE/DETACH DELETE to write. */
 export class CypherAdapter implements IDataSourceAdapter
@@ -24,6 +31,11 @@ export class CypherAdapter implements IDataSourceAdapter
     public static readonly FieldsParam = "fields";
     public static readonly Match = "MATCH";
     public static readonly Merge = "MERGE";
+    public static readonly Create = "CREATE";
+    public static readonly KeyAlias = "key";
+    public static readonly RandomUuidFn = "randomUUID()";
+    private static readonly CommaSpace = ", ";
+    private static readonly InsertKeyNotReturnedReason = "cypher insert returned no key";
     public static readonly SetClause = "SET";
     public static readonly Return = "RETURN";
     public static readonly DetachDelete = "DETACH DELETE";
@@ -108,6 +120,12 @@ export class CypherAdapter implements IDataSourceAdapter
     public get CanTransact(): boolean
     {
         return this.session.Transaction !== undefined;
+    }
+
+    /** Whether this adapter can execute source-keyed inserts: yes, via CREATE ... n.<idKey> = randomUUID() RETURNING it. */
+    public get CanAssignKeys(): boolean
+    {
+        return true;
     }
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
@@ -219,28 +237,42 @@ export class CypherAdapter implements IDataSourceAdapter
      */
     private async ApplySequential(batch: WriteBatch): Promise<WriteResult>
     {
+        return this.RunOps(this.session, batch);
+    }
+
+    /**
+     * Runs every op of `batch` in order against `session`, collecting failures and source-assigned keys. W20: an
+     * applied insert's key is reported under its Ref, so a later op's failure never orphans the CREATEs that applied.
+     */
+    private async RunOps(session: ICypherSession, batch: WriteBatch): Promise<WriteResult>
+    {
         let applied = 0;
         const failures: WriteFailure[] = [];
+        const assigned: IAssignedKey[] = [];
         for (const op of batch.Operations)
         {
-            const failure = await this.ApplyOne(this.session, batch, op);
-            if (failure === undefined)
+            const outcome = await this.ApplyOne(session, batch, op);
+            if (outcome.Failure !== undefined)
             {
-                applied++;
+                failures.push(outcome.Failure);
             }
             else
             {
-                failures.push(failure);
+                applied++;
+                if (outcome.Assigned !== undefined)
+                {
+                    assigned.push(outcome.Assigned);
+                }
             }
         }
-        return { Applied: applied, Failures: failures };
+        return assigned.length === 0 ? { Applied: applied, Failures: failures } : { Applied: applied, Failures: failures, Assigned: assigned };
     }
 
     /**
      * Transactional all-or-nothing apply. A backend that cannot transact returns every op as Unsupported
      * (never a silent downgrade to partial). Otherwise the whole op loop runs inside one session
      * transaction; any Conflict or Error throws a RollbackSignal to abort it, caught here so the collected
-     * failures come back with Applied 0.
+     * failures come back with Applied 0 (an atomic adapter applies nothing on a mid-batch failure).
      */
     private async ApplyTransactional(batch: WriteBatch): Promise<WriteResult>
     {
@@ -259,26 +291,13 @@ export class CypherAdapter implements IDataSourceAdapter
         {
             return await this.session.Transaction!(async (tx) =>
             {
-                let applied = 0;
-                const failures: WriteFailure[] = [];
-                for (const op of batch.Operations)
-                {
-                    const failure = await this.ApplyOne(tx, batch, op);
-                    if (failure === undefined)
-                    {
-                        applied++;
-                    }
-                    else
-                    {
-                        failures.push(failure);
-                    }
-                }
-                if (failures.length > 0)
+                const result = await this.RunOps(tx, batch);
+                if (result.Failures.length > 0)
                 {
                     // Abort the backend transaction; the caller reports nothing as applied.
-                    throw new RollbackSignal({ Applied: 0, Failures: failures });
+                    throw new RollbackSignal({ Applied: 0, Failures: result.Failures });
                 }
-                return { Applied: applied, Failures: failures };
+                return result;
             });
         }
         catch (error)
@@ -293,31 +312,71 @@ export class CypherAdapter implements IDataSourceAdapter
 
     /**
      * Applies one op against a given session (so Sequential and Transactional share the logic):
-     * returns undefined on success, or the WriteFailure (Conflict for a version-guarded no-op, Error for
-     * a thrown driver fault) otherwise.
+     * returns {} on success, { Assigned } for an insert, or { Failure } (Conflict for a version-guarded no-op,
+     * Error for a thrown driver fault) otherwise.
      */
-    private async ApplyOne(session: ICypherSession, batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
+    private async ApplyOne(session: ICypherSession, batch: WriteBatch, op: WriteOperation): Promise<ICypherOpOutcome>
     {
         try
         {
+            if (op.Kind === WriteOperationKind.Insert)
+            {
+                return await this.ApplyInsert(session, batch, op);
+            }
             if (op.Kind === WriteOperationKind.Delete)
             {
-                if (await this.Delete(session, batch, op))
-                {
-                    return undefined;
-                }
-                return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: CypherAdapter.VersionConflictReason };
+                return await this.Delete(session, batch, op)
+                    ? {}
+                    : { Failure: { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: CypherAdapter.VersionConflictReason } };
             }
-            if (await this.ApplyUpsert(session, batch, op))
-            {
-                return undefined;
-            }
-            return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: CypherAdapter.VersionConflictReason };
+            return await this.ApplyUpsert(session, batch, op)
+                ? {}
+                : { Failure: { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: CypherAdapter.VersionConflictReason } };
         }
         catch (error)
         {
-            return { Key: op.Key, Kind: WriteFailureKind.Error, Reason: CypherAdapter.ErrorReason(error) };
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: CypherAdapter.ErrorReason(error) } };
         }
+    }
+
+    /**
+     * Runs one source-keyed insert: `CREATE (n:<Label>) SET n += $fields, n.<idKey> = randomUUID() RETURN n.<idKey>
+     * AS key[, n.<ver> AS ver]`. The source (Neo4j's randomUUID()) assigns a stable property key — elementId is not
+     * stable across stores — reported under the op's Ref, with the row's version when the batch declares a version field.
+     */
+    private async ApplyInsert(session: ICypherSession, batch: WriteBatch, op: WriteOperation): Promise<ICypherOpOutcome>
+    {
+        const label = CypherIdentifier.Quote(batch.Source);
+        const idRef = `${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(batch.IdKey)}`;
+        const setItems = [
+            `${CypherAdapter.NodeVar} ${CypherAdapter.MergeAssign} ${CypherAdapter.ParamPrefix}${CypherAdapter.FieldsParam}`,
+            `${idRef} ${CypherAdapter.EqualOp} ${CypherAdapter.RandomUuidFn}`,
+        ].join(CypherAdapter.CommaSpace);
+        const returnItems = [`${idRef} ${CypherAdapter.AsKeyword} ${CypherAdapter.KeyAlias}`];
+        if (batch.VersionField !== undefined)
+        {
+            returnItems.push(`${CypherAdapter.NodeVar}${CypherAdapter.Dot}${CypherIdentifier.Quote(batch.VersionField)} ${CypherAdapter.AsKeyword} ${CypherAdapter.VersionAlias}`);
+        }
+        const cypher = [CypherAdapter.Create, `${CypherAdapter.OpenParen}${CypherAdapter.NodeVar}${CypherAdapter.Colon}${label}${CypherAdapter.CloseParen}`,
+            CypherAdapter.SetClause, setItems, CypherAdapter.Return, returnItems.join(CypherAdapter.CommaSpace)].join(CypherAdapter.Space);
+        const rows = await session.Run(cypher, { [CypherAdapter.FieldsParam]: { ...op.Fields } });
+        const key = rows[0]?.[CypherAdapter.KeyAlias];
+        if (key === undefined || key === null)
+        {
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: CypherAdapter.InsertKeyNotReturnedReason } };
+        }
+        const version = batch.VersionField === undefined ? undefined : rows[0]?.[CypherAdapter.VersionAlias];
+        return { Assigned: version === undefined || version === null
+            ? { Ref: op.Ref!, Key: CypherAdapter.Cell(key) }
+            : { Ref: op.Ref!, Key: CypherAdapter.Cell(key), Version: CypherAdapter.Cell(version) } };
+    }
+
+    /** An external field value from a raw driver cell (string/number/boolean/null pass; anything else is its text). */
+    private static Cell(value: unknown): ExternalFieldValue
+    {
+        if (value === undefined || value === null) return null;
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+        return String(value);
     }
 
     private IdPattern(batch: WriteBatch): string

@@ -1,19 +1,29 @@
 import { ConnectionFailureKind, WriteAtomicity, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalFieldValue, ExternalRecord, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, IAssignedKey, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { JsonPath } from "./json-path.js";
 import { LinkHeader } from "./rest-paging.js";
 import { FetchFailureClassifier } from "./fetch-failure-classifier.js";
 import { RestHttpMethod } from "./rest-http-client.js";
-import type { IRestHttpClient } from "./rest-http-client.js";
+import type { IRestHttpClient, RestResponse } from "./rest-http-client.js";
 import type { RestConnection } from "./rest-connection-config.js";
 import { RestWriteReasons } from "./write-reasons.js";
 
-/** REST adapter: GET a collection, PUT/DELETE a resource; Where re-applied in-adapter. */
+/** The result of applying one REST op: a failure, or the source-assigned key of an insert; both absent means a plain success. */
+interface IRestOpOutcome
+{
+    readonly Failure?: WriteFailure;
+    readonly Assigned?: IAssignedKey;
+}
+
+/** REST adapter: GET a collection, POST an insert, PUT/DELETE a resource; Where re-applied in-adapter. */
 export class RestAdapter implements IDataSourceAdapter
 {
     private static readonly PathSeparator = "/";
+    private static readonly LocationHeader = "Location";
+    private static readonly ETagHeader = "ETag";
+    private static readonly KeyNotReturnedReason = "rest insert returned no key (no body id field and no Location header)";
     private static readonly IfMatchHeader = "If-Match";
     private static readonly ConflictStatus = 409;
     private static readonly PreconditionFailedStatus = 412;
@@ -64,6 +74,13 @@ export class RestAdapter implements IDataSourceAdapter
     public get CanTransact(): boolean
     {
         return false;
+    }
+
+    /** Whether this adapter can execute source-keyed inserts: yes, by POSTing to the collection and reading the
+     *  assigned key back from the response body or the Location header. */
+    public get CanAssignKeys(): boolean
+    {
+        return true;
     }
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
@@ -149,19 +166,26 @@ export class RestAdapter implements IDataSourceAdapter
         }
         let applied = 0;
         const failures: WriteFailure[] = [];
+        const assigned: IAssignedKey[] = [];
         for (const op of batch.Operations)
         {
-            const failure = await this.ApplyOne(batch, op);
-            if (failure === undefined)
+            const outcome = await this.ApplyOne(batch, op);
+            if (outcome.Failure !== undefined)
             {
-                applied++;
+                failures.push(outcome.Failure);
             }
             else
             {
-                failures.push(failure);
+                applied++;
+                if (outcome.Assigned !== undefined)
+                {
+                    assigned.push(outcome.Assigned);
+                }
             }
         }
-        return { Applied: applied, Failures: failures };
+        // W20: a mid-batch failure never orphans the POSTs that already applied — each applied insert's key is
+        // reported here under its Ref, and the loop returns normally (ApplyOne catches every per-op throw).
+        return assigned.length === 0 ? { Applied: applied, Failures: failures } : { Applied: applied, Failures: failures, Assigned: assigned };
     }
 
     public async Dispose(): Promise<void>
@@ -171,22 +195,69 @@ export class RestAdapter implements IDataSourceAdapter
     /**
      * Applies one op resiliently: a non-2xx (other than a version-conflict code) or a transport throw
      * becomes a WriteFailure{Error}; a version-conflict code or a fail-closed unversioned optimistic op
-     * becomes a WriteFailure{Conflict}; success returns undefined.
+     * becomes a WriteFailure{Conflict}; an insert returns its source-assigned key; a plain success returns {}.
      */
-    private async ApplyOne(batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
+    private async ApplyOne(batch: WriteBatch, op: WriteOperation): Promise<IRestOpOutcome>
     {
         try
         {
-            if (op.Kind === WriteOperationKind.Delete)
+            if (op.Kind === WriteOperationKind.Insert)
             {
-                return await this.ApplyDelete(batch, op);
+                return await this.ApplyInsert(batch, op);
             }
-            return await this.ApplyUpsert(batch, op);
+            const failure = op.Kind === WriteOperationKind.Delete
+                ? await this.ApplyDelete(batch, op)
+                : await this.ApplyUpsert(batch, op);
+            return failure === undefined ? {} : { Failure: failure };
         }
         catch (error)
         {
-            return { Key: op.Key, Kind: WriteFailureKind.Error, Reason: RestAdapter.ErrorReason(error) };
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: RestAdapter.ErrorReason(error) } };
         }
+    }
+
+    /**
+     * POSTs an insert to the collection URL (the source assigns the key). The key is the body field IdKey, else
+     * the last path segment of the Location header; its absence is an Error failure. The row's version is the
+     * ETag header when present.
+     */
+    private async ApplyInsert(batch: WriteBatch, op: WriteOperation): Promise<IRestOpOutcome>
+    {
+        const response = await this.client.Send(
+            RestHttpMethod.Post, this.CollectionUrl(batch.Source), { ...this.connection.headers }, op.Fields);
+        RestAdapter.EnsureSuccess(response.Status);
+        const key = RestAdapter.InsertKey(batch, response);
+        if (key === undefined || key === null)
+        {
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: RestAdapter.KeyNotReturnedReason } };
+        }
+        const version = RestAdapter.Header(response, RestAdapter.ETagHeader);
+        return { Assigned: version === undefined ? { Ref: op.Ref!, Key: key } : { Ref: op.Ref!, Key: key, Version: version } };
+    }
+
+    /** The assigned key of an inserted row: the body field IdKey, else the last path segment of the Location header. */
+    private static InsertKey(batch: WriteBatch, response: RestResponse): ExternalFieldValue | undefined
+    {
+        const body = response.Body as Record<string, unknown> | undefined;
+        const fromBody = body?.[batch.IdKey];
+        if (fromBody !== undefined && fromBody !== null)
+        {
+            return fromBody as ExternalFieldValue;
+        }
+        const location = RestAdapter.Header(response, RestAdapter.LocationHeader);
+        if (location === undefined)
+        {
+            return undefined;
+        }
+        const segments = location.split(RestAdapter.PathSeparator).filter(s => s.length > 0);
+        return segments.length === 0 ? undefined : decodeURIComponent(segments[segments.length - 1]!);
+    }
+
+    /** A response header looked up case-insensitively (the production client lower-cases every key). */
+    private static Header(response: RestResponse, name: string): string | undefined
+    {
+        const headers = response.Headers;
+        return headers?.[name] ?? headers?.[name.toLowerCase()];
     }
 
     /**

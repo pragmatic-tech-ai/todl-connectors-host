@@ -1,13 +1,22 @@
 import { ConnectionFailureKind, RollbackSignal, WriteAtomicity, WriteCapability, WriteConcurrency, WriteFailureKind, WriteOperationKind } from "@pragmatic-tech-ai/todl";
-import type { ExternalFieldValue, ExternalRecord, IDataSourceAdapter, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
+import type { ExternalFieldValue, ExternalRecord, IAssignedKey, IDataSourceAdapter, PageQuery, PageSlice, QueryRequest, WriteBatch, WriteFailure, WriteOperation, WriteResult } from "@pragmatic-tech-ai/todl";
 import { ExternalQuery } from "../query/external-query.js";
 import { MongoFilter } from "./mongo-filter.js";
 import { DocumentIdentifier } from "./document-identifier.js";
 import type { IDocumentSession } from "./document-session.js";
 
-/** Document adapter: Find to read (Where re-applied in-adapter), Upsert/Delete to write. */
+/** The result of applying one document op: a failure, or the source-assigned key of an insert; both absent means a plain success. */
+interface IDocumentOpOutcome
+{
+    readonly Failure?: WriteFailure;
+    readonly Assigned?: IAssignedKey;
+}
+
+/** Document adapter: Find to read (Where re-applied in-adapter), Insert/Upsert/Delete to write. */
 export class DocumentAdapter implements IDataSourceAdapter
 {
+    private static readonly MongoIdKey = "_id";
+    private static readonly InsertUnsupportedReason = "document insert requires the _id key (the source assigns _id)";
     private static readonly InvalidLimitMessage = "QueryPage Limit must be a positive integer";
     private static readonly MissingOrderKeyMessage = "QueryPage requires request.OrderKey or at least one field to order by";
     private static readonly VersionConflictReason = "version mismatch";
@@ -61,6 +70,12 @@ export class DocumentAdapter implements IDataSourceAdapter
     public get CanTransact(): boolean
     {
         return this.session.Transaction !== undefined;
+    }
+
+    /** Whether this adapter can execute source-keyed inserts: iff its session exposes {@link IDocumentSession.Insert}. */
+    public get CanAssignKeys(): boolean
+    {
+        return this.session.Insert !== undefined;
     }
 
     public async Query(request: QueryRequest): Promise<readonly ExternalRecord[]>
@@ -140,28 +155,42 @@ export class DocumentAdapter implements IDataSourceAdapter
      */
     private async ApplySequential(batch: WriteBatch): Promise<WriteResult>
     {
+        return this.RunOps(this.session, batch);
+    }
+
+    /**
+     * Runs every op of `batch` in order against `session`, collecting failures and source-assigned keys. W20: an
+     * applied insert's key is reported under its Ref, so a later op's failure never orphans the inserts that applied.
+     */
+    private async RunOps(session: IDocumentSession, batch: WriteBatch): Promise<WriteResult>
+    {
         let applied = 0;
         const failures: WriteFailure[] = [];
+        const assigned: IAssignedKey[] = [];
         for (const op of batch.Operations)
         {
-            const failure = await this.ApplyOne(this.session, batch, op);
-            if (failure === undefined)
+            const outcome = await this.ApplyOne(session, batch, op);
+            if (outcome.Failure !== undefined)
             {
-                applied++;
+                failures.push(outcome.Failure);
             }
             else
             {
-                failures.push(failure);
+                applied++;
+                if (outcome.Assigned !== undefined)
+                {
+                    assigned.push(outcome.Assigned);
+                }
             }
         }
-        return { Applied: applied, Failures: failures };
+        return assigned.length === 0 ? { Applied: applied, Failures: failures } : { Applied: applied, Failures: failures, Assigned: assigned };
     }
 
     /**
      * Transactional all-or-nothing apply. A backend that cannot transact returns every op as Unsupported
      * (never a silent downgrade to partial). Otherwise the whole op loop runs inside one session
      * transaction; any Conflict or Error throws a RollbackSignal to abort it, caught here so the collected
-     * failures come back with Applied 0.
+     * failures come back with Applied 0 (an atomic adapter applies nothing on a mid-batch failure).
      */
     private async ApplyTransactional(batch: WriteBatch): Promise<WriteResult>
     {
@@ -173,26 +202,13 @@ export class DocumentAdapter implements IDataSourceAdapter
         {
             return await this.session.Transaction!(async (tx) =>
             {
-                let applied = 0;
-                const failures: WriteFailure[] = [];
-                for (const op of batch.Operations)
-                {
-                    const failure = await this.ApplyOne(tx, batch, op);
-                    if (failure === undefined)
-                    {
-                        applied++;
-                    }
-                    else
-                    {
-                        failures.push(failure);
-                    }
-                }
-                if (failures.length > 0)
+                const result = await this.RunOps(tx, batch);
+                if (result.Failures.length > 0)
                 {
                     // Abort the backend transaction; the caller reports nothing as applied.
-                    throw new RollbackSignal({ Applied: 0, Failures: failures });
+                    throw new RollbackSignal({ Applied: 0, Failures: result.Failures });
                 }
-                return { Applied: applied, Failures: failures };
+                return result;
             });
         }
         catch (error)
@@ -207,31 +223,56 @@ export class DocumentAdapter implements IDataSourceAdapter
 
     /**
      * Applies one op against a given session (so Sequential and Transactional share the logic):
-     * returns undefined on success, or the WriteFailure (Conflict for a version-guarded no-op, Error for
-     * a thrown driver fault) otherwise.
+     * returns {} on success, { Assigned } for an insert, or { Failure } (Conflict for a version-guarded no-op,
+     * Unsupported for a non-_id insert, Error for a thrown driver fault) otherwise.
      */
-    private async ApplyOne(session: IDocumentSession, batch: WriteBatch, op: WriteOperation): Promise<WriteFailure | undefined>
+    private async ApplyOne(session: IDocumentSession, batch: WriteBatch, op: WriteOperation): Promise<IDocumentOpOutcome>
     {
         try
         {
+            if (op.Kind === WriteOperationKind.Insert)
+            {
+                return await this.ApplyInsert(session, batch, op);
+            }
             if (op.Kind === WriteOperationKind.Delete)
             {
-                if (await this.ApplyDelete(session, batch, op))
-                {
-                    return undefined;
-                }
-                return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: DocumentAdapter.VersionConflictReason };
+                return await this.ApplyDelete(session, batch, op)
+                    ? {}
+                    : { Failure: { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: DocumentAdapter.VersionConflictReason } };
             }
-            if (await this.ApplyUpsert(session, batch, op))
-            {
-                return undefined;
-            }
-            return { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: DocumentAdapter.VersionConflictReason };
+            return await this.ApplyUpsert(session, batch, op)
+                ? {}
+                : { Failure: { Key: op.Key, Kind: WriteFailureKind.Conflict, Reason: DocumentAdapter.VersionConflictReason } };
         }
         catch (error)
         {
-            return { Key: op.Key, Kind: WriteFailureKind.Error, Reason: DocumentAdapter.ErrorReason(error) };
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Error, Reason: DocumentAdapter.ErrorReason(error) } };
         }
+    }
+
+    /**
+     * Runs one source-keyed insert: supported only when the batch's IdKey is `_id` (Mongo assigns `_id`; any other
+     * key is not source-assigned here), through {@link IDocumentSession.Insert}. The assigned `_id` ObjectId is
+     * reported as its hex string under the op's Ref.
+     */
+    private async ApplyInsert(session: IDocumentSession, batch: WriteBatch, op: WriteOperation): Promise<IDocumentOpOutcome>
+    {
+        if (batch.IdKey !== DocumentAdapter.MongoIdKey || session.Insert === undefined)
+        {
+            return { Failure: { Key: op.Key, Kind: WriteFailureKind.Unsupported, Reason: DocumentAdapter.InsertUnsupportedReason } };
+        }
+        const insertedId = await session.Insert(batch.Source, { ...op.Fields });
+        return { Assigned: { Ref: op.Ref!, Key: DocumentAdapter.HexKey(insertedId) } };
+    }
+
+    /** An assigned `_id` as an external key: a Mongo ObjectId via toHexString(), else its string form. */
+    private static HexKey(id: unknown): ExternalFieldValue
+    {
+        if (id !== null && typeof id === "object" && typeof (id as { toHexString?: unknown }).toHexString === "function")
+        {
+            return (id as { toHexString(): string }).toHexString();
+        }
+        return String(id);
     }
 
     /**

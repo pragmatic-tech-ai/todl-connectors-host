@@ -30,8 +30,11 @@ export interface FakeGraphQlRequest
 /** In-memory GraphQL backend: recognizes the configured query/mutation names, records sent requests, and injects per-op errors. */
 export class FakeGraphQlHttpClient implements IRestHttpClient
 {
+    public static readonly FailField = "__fail";
     private static readonly OkStatus = 200;
     private static readonly IdKey = "id";
+    private static readonly InsertKeyPrefix = "g";
+    private static readonly InsertFailMessage = "graphql insert rejected";
     private static readonly DataKey = "data";
     private static readonly ErrorsKey = "errors";
     private static readonly MessageKey = "message";
@@ -40,6 +43,7 @@ export class FakeGraphQlHttpClient implements IRestHttpClient
     private static readonly CodeKey = "code";
     private readonly store = new Map<string, Record<string, unknown>>();
     private readonly injections = new Map<string, FakeGraphQlInjection>();
+    private nextInsertId = 0;
 
     /** Every request the adapter sent, in order, for exact document/variable assertions. */
     public readonly Sent: FakeGraphQlRequest[] = [];
@@ -72,6 +76,10 @@ export class FakeGraphQlHttpClient implements IRestHttpClient
         const query = doc?.query ?? "";
         const vars = doc?.variables ?? {};
         this.Sent.push({ Query: query, Variables: vars });
+        if (this.connection.insertMutation !== undefined && query.includes(this.connection.insertMutation))
+        {
+            return this.HandleInsert(this.connection.insertMutation, vars);
+        }
         if (this.connection.upsertMutation !== undefined && query.includes(this.connection.upsertMutation))
         {
             return this.HandleUpsert(this.connection.upsertMutation, vars);
@@ -95,6 +103,20 @@ export class FakeGraphQlHttpClient implements IRestHttpClient
         this.store.set(key, { ...input });
         const payload = injection?.ReturnId !== undefined ? { ...input, [FakeGraphQlHttpClient.IdKey]: injection.ReturnId } : input;
         return { Status: injection?.Status ?? FakeGraphQlHttpClient.OkStatus, Body: { [FakeGraphQlHttpClient.DataKey]: { [mutation]: payload } } };
+    }
+
+    /** Handles a source-keyed insert: a FailField marker yields a GraphQL errors array; otherwise the server assigns a key and returns it. */
+    private HandleInsert(mutation: string, vars: Record<string, unknown>): RestResponse
+    {
+        const input = (vars[this.connection.insertInputArg] ?? {}) as Record<string, unknown>;
+        if (FakeGraphQlHttpClient.FailField in input)
+        {
+            return { Status: FakeGraphQlHttpClient.OkStatus, Body: { [FakeGraphQlHttpClient.DataKey]: null, [FakeGraphQlHttpClient.ErrorsKey]: [{ [FakeGraphQlHttpClient.MessageKey]: FakeGraphQlHttpClient.InsertFailMessage }] } };
+        }
+        const key = FakeGraphQlHttpClient.InsertKeyPrefix + String(++this.nextInsertId);
+        const row = { ...input, [FakeGraphQlHttpClient.IdKey]: key };
+        this.store.set(key, row);
+        return { Status: FakeGraphQlHttpClient.OkStatus, Body: { [FakeGraphQlHttpClient.DataKey]: { [mutation]: row } } };
     }
 
     private HandleDelete(mutation: string, vars: Record<string, unknown>): RestResponse

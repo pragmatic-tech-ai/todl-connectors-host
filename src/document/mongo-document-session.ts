@@ -126,6 +126,14 @@ export class MongoDocumentSession implements IDocumentSession
         return result.deletedCount > 0;
     }
 
+    /** Inserts a new document, letting Mongo assign its `_id`, and returns that insertedId (an ObjectId). */
+    public async Insert(collection: string, doc: Record<string, unknown>): Promise<unknown>
+    {
+        DocumentIdentifier.Validate(collection);
+        const result = await this.client.db(this.database).collection(collection).insertOne({ ...doc }, this.SessionOption());
+        return result.insertedId;
+    }
+
     /**
      * Probes a document in a single findOne, distinguishing three states so the adapter can fail CLOSED:
      * absent (doc null -> Exists:false), present-but-unversioned (Version null: the versionField is missing),

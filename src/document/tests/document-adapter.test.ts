@@ -4,7 +4,7 @@ import { QueryCompareOp, WriteAtomicity, WriteConcurrency, WriteFailureKind, Wri
 import { DocumentAdapter } from "../document-adapter.js";
 import type { DocumentFindOptions, IDocumentSession } from "../document-session.js";
 import { FakeDocumentSession, TransactionalFakeDocumentSession } from "../../testing/fake-document-session.js";
-import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
+import { describeDataSourceAdapter, describeInsertingAdapter } from "../../testing/adapter-conformance.js";
 
 class DocumentFixture
 {
@@ -26,6 +26,64 @@ class DocumentFixture
 }
 
 describeDataSourceAdapter("DocumentAdapter (fake session)", () => DocumentFixture.Make());
+
+const Events = "events";
+const MongoId = "_id";
+
+describeInsertingAdapter("DocumentAdapter (fake session)", () => new DocumentAdapter(new FakeDocumentSession()),
+    { Source: Events, IdKey: MongoId, FailFields: { [FakeDocumentSession.FailField]: "1" } });
+
+test("document advertises CanAssignKeys iff its session can insert", () =>
+{
+    assert.equal(new DocumentAdapter(new FakeDocumentSession()).CanAssignKeys, true);
+    const noInsert: IDocumentSession = {
+        Find: async () => [], Upsert: async () => {}, Delete: async () => false,
+    };
+    assert.equal(new DocumentAdapter(noInsert).CanAssignKeys, false);
+});
+
+test("mongo insert needs the _id key: any other id key is Unsupported, nothing assigned", async () =>
+{
+    const adapter = new DocumentAdapter(new FakeDocumentSession());
+    const result = await adapter.Apply({
+        Source: Events, IdKey: DocumentFixture.IdField, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { [DocumentFixture.Label]: "x" } }],
+    });
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Assigned, undefined);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Unsupported);
+});
+
+test("bulk insert correlates by ref: each ref gets its own distinct assigned _id", async () =>
+{
+    const adapter = new DocumentAdapter(new FakeDocumentSession());
+    const result = await adapter.Apply({
+        Source: Events, IdKey: MongoId, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [
+            { Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { [DocumentFixture.Label]: "a" } },
+            { Kind: WriteOperationKind.Insert, Key: null, Ref: "r2", Fields: { [DocumentFixture.Label]: "b" } },
+            { Kind: WriteOperationKind.Insert, Key: null, Ref: "r3", Fields: { [DocumentFixture.Label]: "c" } }],
+    });
+    assert.equal(result.Applied, 3);
+    const byRef = new Map(result.Assigned!.map(a => [a.Ref, a.Key]));
+    assert.deepEqual([...byRef.keys()].sort(), ["r1", "r2", "r3"]);
+    assert.equal(new Set(byRef.values()).size, 3);
+});
+
+test("an ObjectId assigned _id is reported as its hex string", async () =>
+{
+    const hex = "507f1f77bcf86cd799439011";
+    const session: IDocumentSession = {
+        Find: async () => [], Upsert: async () => {}, Delete: async () => false,
+        Insert: async () => ({ toHexString: () => hex }),
+    };
+    const result = await new DocumentAdapter(session).Apply({
+        Source: Events, IdKey: MongoId, Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: {} }],
+    });
+    assert.deepEqual(result.Assigned, [{ Ref: "r1", Key: hex }]);
+});
 
 test("Neq over a null field never returns the null-field row (SQL-null, not Mongo $ne:null)", async () =>
 {

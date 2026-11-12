@@ -32,10 +32,23 @@ export class PgMemAdapterHarness
         return PgMemAdapterHarness.SeedOpen + table + PgMemAdapterHarness.SeedClose;
     }
 
+    /** The source-keyed insert fixture table: a serial PRIMARY KEY the source assigns on INSERT ... RETURNING id. */
+    public static readonly InsertTable = "Widget";
+    private static readonly CreateInsertTableSql = 'CREATE TABLE "Widget" (id serial primary key, label text)';
+
     /** A fresh, isolated in-process database per call. */
     public static Make(): IDataSourceAdapter
     {
         return new SqlAdapter(PgMemAdapterHarness.Session());
+    }
+
+    /** A fresh adapter over a serial-keyed table, for the source-keyed insert conformance (the DB assigns `id`). */
+    public static MakeInserting(): IDataSourceAdapter
+    {
+        const db = newDb();
+        db.public.none(PgMemAdapterHarness.CreateInsertTableSql);
+        const pg = db.adapters.createPg();
+        return new SqlAdapter(new PgSqlSession(new pg.Pool() as unknown as Pool));
     }
 
     /**

@@ -7,7 +7,7 @@ import { RestConnectionConfig } from "../rest-connection-config.js";
 import { RestHttpMethod } from "../rest-http-client.js";
 import type { RestResponse } from "../rest-http-client.js";
 import { FakeRestHttpClient } from "../../testing/fake-rest-http-client.js";
-import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
+import { describeDataSourceAdapter, describeInsertingAdapter } from "../../testing/adapter-conformance.js";
 
 const BaseUrl = "https://api.example/v1";
 const Customer = "Customer";
@@ -52,6 +52,75 @@ class RestAdapterFixture
 }
 
 describeDataSourceAdapter("RestAdapter (fake client)", () => RestAdapterFixture.Make());
+
+const Orders = "orders";
+
+/** Builds a RestAdapter over a fresh fake backend for the source-keyed insert conformance (POST assigns the key). */
+class RestInsertFixture
+{
+    public static Make(): RestAdapter
+    {
+        return new RestAdapter(new FakeRestHttpClient(BaseUrl), RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    }
+}
+
+describeInsertingAdapter("RestAdapter (fake client)", () => RestInsertFixture.Make(),
+    { Source: Orders, FailFields: { [FakeRestHttpClient.FailField]: "1" } });
+
+test("rest key from Location: the assigned key is the last path segment of the Location header", async () =>
+{
+    const client = { GetJson: async () => [], Send: async () => ({ Status: 201, Body: undefined, Headers: { Location: "/orders/42" } }) };
+    const adapter = new RestAdapter(client, RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    const result = await adapter.Apply({
+        Source: Orders, IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { label: "x" } }],
+    });
+    assert.equal(result.Applied, 1);
+    assert.equal(result.Failures.length, 0);
+    assert.deepEqual(result.Assigned, [{ Ref: "r1", Key: "42" }]);
+});
+
+test("rest insert reads the key from the body id field when present (over the Location)", async () =>
+{
+    const adapter = RestInsertFixture.Make();
+    const result = await adapter.Apply({
+        Source: Orders, IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { label: "x" } }],
+    });
+    assert.equal(result.Applied, 1);
+    assert.equal(result.Assigned![0]!.Ref, "r1");
+    assert.notEqual(result.Assigned![0]!.Key, null);
+});
+
+test("rest insert without a key (no body id, no Location) is an Error failure, nothing assigned", async () =>
+{
+    const client = { GetJson: async () => [], Send: async () => ({ Status: 201, Body: undefined, Headers: {} }) };
+    const adapter = new RestAdapter(client, RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    const result = await adapter.Apply({
+        Source: Orders, IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { label: "x" } }],
+    });
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Assigned, undefined);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Error);
+});
+
+test("REST advertises CanAssignKeys", () =>
+{
+    assert.equal(RestInsertFixture.Make().CanAssignKeys, true);
+});
+
+test("rest insert reports the row version from the ETag header", async () =>
+{
+    const client = { GetJson: async () => [], Send: async () => ({ Status: 201, Body: { id: "7" }, Headers: { ETag: "v9" } }) };
+    const adapter = new RestAdapter(client, RestConnectionConfig.From({ baseUrl: BaseUrl }));
+    const result = await adapter.Apply({
+        Source: Orders, IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: {} }],
+    });
+    assert.deepEqual(result.Assigned, [{ Ref: "r1", Key: "7", Version: "v9" }]);
+});
 
 test("RestConnectionConfig turns a secret into a bearer header, not a url", () =>
 {

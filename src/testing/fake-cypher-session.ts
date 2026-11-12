@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { CypherAdapter } from "../cypher/cypher-adapter.js";
 import type { CypherRow, ICypherSession } from "../cypher/cypher-session.js";
 
@@ -21,6 +22,14 @@ export class FakeCypherSession implements ICypherSession
     private static readonly HeadPattern = new RegExp(
         "^(?:MATCH|MERGE) \\(n:`" + FakeCypherSession.QuotedName + "`(?: \\{`" + FakeCypherSession.QuotedName + "`:[^}]*\\})?\\)");
     private static readonly VersionFieldPattern = new RegExp("^n\\.`" + FakeCypherSession.QuotedName + "`");
+    public static readonly FailField = "__fail";
+    private static readonly InsertFailMessage = "cypher create rejected";
+    // CREATE (n:`Label`)
+    private static readonly CreateLabelPattern = new RegExp("^" + CypherAdapter.Create + " \\(n:`" + FakeCypherSession.QuotedName + "`\\)");
+    // n.`idKey` = randomUUID()
+    private static readonly CreateIdPattern = new RegExp("n\\.`" + FakeCypherSession.QuotedName + "` " + CypherAdapter.EqualOp + " " + CypherAdapter.RandomUuidFn.replace("(", "\\(").replace(")", "\\)"));
+    // n.`ver` AS ver
+    private static readonly CreateVerPattern = new RegExp("n\\.`" + FakeCypherSession.QuotedName + "` " + CypherAdapter.AsKeyword + " " + CypherAdapter.VersionAlias);
 
     // WHERE n.`ver` = $ver DETACH DELETE n RETURN count(n) AS deleted
     private static readonly GuardedDeletePattern = new RegExp(
@@ -44,6 +53,10 @@ export class FakeCypherSession implements ICypherSession
     public async Run(cypher: string, params: Record<string, unknown>): Promise<readonly CypherRow[]>
     {
         this.Statements.push({ cypher, params });
+        if (cypher.startsWith(CypherAdapter.Create))
+        {
+            return this.Create(cypher, params);
+        }
         const head = FakeCypherSession.HeadPattern.exec(cypher);
         const label = FakeCypherSession.Unescape(head?.[1] ?? FakeCypherSession.Empty);
         const idField = FakeCypherSession.Unescape(head?.[2] ?? FakeCypherSession.SeedIdField);
@@ -84,6 +97,33 @@ export class FakeCypherSession implements ICypherSession
             return node === undefined ? [] : [{ [CypherAdapter.VersionAlias]: node[field] ?? null }];
         }
         return [...(bucket?.values() ?? [])].map(props => ({ [CypherAdapter.PropsAlias]: props }));
+    }
+
+    /**
+     * Handles a `CREATE (n:Label) SET n += $fields, n.idKey = randomUUID() RETURN n.idKey AS key[, n.ver AS ver]`:
+     * assigns a fresh UUID for the id property (as Neo4j's randomUUID() would), stores the node and returns the key
+     * (and the version when selected). A FailField marker in the fields throws, as a driver fault would.
+     */
+    private Create(cypher: string, params: Record<string, unknown>): CypherRow[]
+    {
+        const label = FakeCypherSession.Unescape(FakeCypherSession.CreateLabelPattern.exec(cypher)?.[1] ?? FakeCypherSession.Empty);
+        const idField = FakeCypherSession.Unescape(FakeCypherSession.CreateIdPattern.exec(cypher)?.[1] ?? FakeCypherSession.SeedIdField);
+        const fields = (params[CypherAdapter.FieldsParam] ?? {}) as Record<string, unknown>;
+        if (FakeCypherSession.FailField in fields)
+        {
+            throw new Error(FakeCypherSession.InsertFailMessage);
+        }
+        const uuid = randomUUID();
+        const bucket = this.store.get(label) ?? new Map<string, Record<string, unknown>>();
+        this.store.set(label, bucket);
+        bucket.set(uuid, { ...fields, [idField]: uuid });
+        const row: Record<string, unknown> = { [CypherAdapter.KeyAlias]: uuid };
+        const verMatch = FakeCypherSession.CreateVerPattern.exec(cypher);
+        if (verMatch !== null)
+        {
+            row[CypherAdapter.VersionAlias] = fields[FakeCypherSession.Unescape(verMatch[1]!)] ?? null;
+        }
+        return [row];
     }
 
     /** Deep-copies the store so a transaction can roll back to this point. */

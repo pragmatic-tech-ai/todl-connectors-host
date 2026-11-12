@@ -7,7 +7,7 @@ import { FetchFailureClassifier } from "../fetch-failure-classifier.js";
 import { RestHttpMethod } from "../rest-http-client.js";
 import type { RestResponse } from "../rest-http-client.js";
 import { FakeGraphQlHttpClient } from "../../testing/fake-graphql-http-client.js";
-import { describeDataSourceAdapter } from "../../testing/adapter-conformance.js";
+import { describeDataSourceAdapter, describeInsertingAdapter } from "../../testing/adapter-conformance.js";
 
 const Endpoint = "https://api.example/graphql";
 const Customer = "Customer";
@@ -71,6 +71,31 @@ class ThrowingGraphQlClient extends FakeGraphQlHttpClient
 }
 
 describeDataSourceAdapter("GraphQlAdapter (fake client)", () => GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull()));
+
+const InsertingConfig = (): Record<string, string> =>
+    ({ style: "graphql", endpoint: Endpoint, source: Customer, queryField: "customers", insertMutation: "insertCustomer" });
+
+describeInsertingAdapter("GraphQlAdapter (fake client)", () => GraphQlAdapterFixture.Make(InsertingConfig()),
+    { Source: Customer, FailFields: { [FakeGraphQlHttpClient.FailField]: "1" } });
+
+test("graphql advertises CanAssignKeys only when insertMutation is configured", () =>
+{
+    assert.equal(GraphQlAdapterFixture.Make(InsertingConfig()).CanAssignKeys, true);
+    assert.equal(GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull()).CanAssignKeys, false);
+});
+
+test("graphql without insertMutation cannot assign: an insert op is Unsupported, nothing assigned", async () =>
+{
+    const adapter = GraphQlAdapterFixture.Make(GraphQlAdapterFixture.ConfigFull());
+    const result = await adapter.Apply({
+        Source: Customer, IdKey: "id", Concurrency: WriteConcurrency.LastWriteWins, Atomicity: WriteAtomicity.Sequential,
+        Operations: [{ Kind: WriteOperationKind.Insert, Key: null, Ref: "r1", Fields: { label: "x" } }],
+    });
+    assert.equal(result.Applied, 0);
+    assert.equal(result.Assigned, undefined);
+    assert.equal(result.Failures.length, 1);
+    assert.equal(result.Failures[0]!.Kind, WriteFailureKind.Unsupported);
+});
 
 test("GraphQL advertises neither CanVersion nor CanTransact", () =>
 {
