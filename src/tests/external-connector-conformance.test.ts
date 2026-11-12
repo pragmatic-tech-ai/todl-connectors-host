@@ -131,11 +131,13 @@ for (const atomicity of [WriteAtomicity.Sequential, WriteAtomicity.Transactional
         try
         {
             const id = run.Id(ExternalConformanceRun.SeedId);
-            const tx = await run.Stage([
+            // Immediate writes: the delete-then-create merges to one upsert that nulls the NOT NULL column, and that fails
+            // at the step (Apply), not at Commit. The row is untouched (nothing applied), and Revert compensates nothing.
+            const tx = await run.Begin();
+            await assert.rejects(run.Step(tx, [
                 ExternalConformanceRun.Delete(id),
                 ExternalConformanceRun.Create(id),
-                ExternalConformanceRun.Set(id, ExternalConformanceRun.LabelMember, ExternalConformanceRun.NewLabel)]);
-            await assert.rejects(tx.Commit(), (error: unknown) =>
+                ExternalConformanceRun.Set(id, ExternalConformanceRun.LabelMember, ExternalConformanceRun.NewLabel)]), (error: unknown) =>
                 error instanceof ExternalWriteError
                 && error.Code === EngineBridgeErrorCode.ExternalWriteFailed
                 && error.Failures.length === 1

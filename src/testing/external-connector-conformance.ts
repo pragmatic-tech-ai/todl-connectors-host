@@ -13,6 +13,7 @@ import {
     ValueType,
     WriteOp,
     type ConnectorChange,
+    type IConnectorApplyResult,
     type IConnectorTransaction,
     type IFetchedRow,
     type IFetchRequest,
@@ -299,20 +300,36 @@ export class ExternalConformanceRun
         return { Rows: rows, Pages: pages };
     }
 
-    /** Opens a transaction and applies `changes` (no remote effect yet); the caller commits or reverts it. */
+    /**
+     * Opens a transaction and executes `changes` as one immediate write step (the source applies them now, ruling R139
+     * E9); the caller then finalizes with Commit or compensates with Revert. A case that must hold the transaction while a
+     * step fails opens it with Begin and drives the step with Step, so it keeps the handle past the throw.
+     */
     public async Stage(changes: readonly ConnectorChange[]): Promise<IConnectorTransaction>
     {
-        const tx = await this.Connector.Begin();
-        await tx.Apply(new ConnectorChangeSet(changes));
+        const tx = await this.Begin();
+        await this.Step(tx, changes);
         return tx;
     }
 
-    /** Stages and commits `changes`; returns the committed transaction (so a case can revert it). */
+    /** Executes `changes` as one immediate step and finalizes it with Commit; returns the committed transaction. */
     public async Write(changes: readonly ConnectorChange[]): Promise<IConnectorTransaction>
     {
         const tx = await this.Stage(changes);
         await tx.Commit();
         return tx;
+    }
+
+    /** Opens a transaction the case drives itself (so it holds the handle even when a step throws). */
+    public Begin(): Promise<IConnectorTransaction>
+    {
+        return this.Connector.Begin();
+    }
+
+    /** Executes `changes` on `tx` as one immediate write step: the step runs at the source now and reports its versions. */
+    public Step(tx: IConnectorTransaction, changes: readonly ConnectorChange[]): Promise<IConnectorApplyResult | void>
+    {
+        return tx.Apply(new ConnectorChangeSet(changes));
     }
 
     /** Writes `rows` (each holding IdKey) straight to the source, bypassing the connector (last-write-wins). */
@@ -434,7 +451,7 @@ export class ExternalConnectorConformance
     private static readonly DeleteTitle = "delete commits to the source";
     private static readonly DeleteMissingTitle = "delete of a missing key is not a failure";
     private static readonly CompensateTitle = "revert of a create that never applied is not a CompensationFailed";
-    private static readonly RevertTitle = "revert after commit restores the before-image";
+    private static readonly RevertTitle = "an executed step is visible before commit; revert compensates it and commit makes it permanent";
     private static readonly FailureTitle = "per-op failure surfaces as ExternalWriteFailed";
     private static readonly ConflictTitle = "source-reported version conflict on an Optimistic batch surfaces as ExternalVersionConflict";
     private static readonly SkipUnversioned = "the adapter cannot version, or the store does not honor the version guard";
@@ -543,39 +560,54 @@ export class ExternalConnectorConformance
             assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.SeedLabel)]);
         });
 
-        // A create whose adapter call threw counts as applied, so Revert compensates it with a Delete of a key the source
-        // never held; that Delete must not fail, or harmless compensation turns into a spurious CompensationFailed.
+        // Immediate writes: the step executes at Apply, so a create whose adapter call throws there still counts as
+        // applied, and Revert compensates it with a Delete of a key the source never held; that Delete must not fail, or
+        // harmless compensation turns into a spurious CompensationFailed.
         run(C.CompensateTitle, async r =>
         {
             const id = r.Id(R.NewId);
-            const tx = await r.Stage([R.Create(id), R.Set(id, R.LabelMember, R.NewLabel)]);
+            const tx = await r.Begin();
             r.Recorder.ThrowNextApply = true;
-            await assert.rejects(tx.Commit());
+            await assert.rejects(r.Step(tx, [R.Create(id), R.Set(id, R.LabelMember, R.NewLabel)]));
             await tx.Revert();
             assert.deepEqual(r.Recorder.DeletedKeys(), [R.NewId]);
             assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.SeedLabel)]);
         });
 
+        // Under immediate writes a step executes at the source when Apply runs, so its changes are visible before any
+        // Commit. Revert before Commit COMPENSATES by applying inverse writes (the new row is deleted, the updated row is
+        // set back) — never a before-image snapshot restore. Commit only finalizes: a committed step is permanent, and a
+        // Revert after it compensates nothing and restores nothing (the retired behavior rolled the row back).
         run(C.RevertTitle, async r =>
         {
             const created = r.Id(R.NewId);
-            const tx = await r.Write([
+            const aborting = await r.Begin();
+            await r.Step(aborting, [
                 R.Set(r.Id(R.SeedId), R.LabelMember, R.UpdatedLabel),
                 R.Create(created),
                 R.Set(created, R.LabelMember, R.NewLabel)]);
+            // Executed at once, before any Commit.
             assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.UpdatedLabel), R.Row(R.NewId, R.NewLabel)]);
-            await tx.Revert();
+            await aborting.Revert();
+            // Inverse writes applied: the new row deleted, the seed's label set back. The source is as it began.
             assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.SeedLabel)]);
+
+            const committed = await r.Write([R.Set(r.Id(R.SeedId), R.LabelMember, R.UpdatedLabel)]);
+            assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.UpdatedLabel)]);
+            await committed.Revert();
+            // Commit finalized the write: the committed state stands, Revert restores no before-image.
+            assert.deepEqual(await r.Rows(), [R.Row(R.SeedId, R.UpdatedLabel)]);
         });
 
-        // A non-conflict per-op failure the source reports (here every op rejected as Error, nothing applied) surfaces as
-        // ExternalWriteFailed (only a Conflict becomes ExternalVersionConflict), and a Revert leaves the source as it was.
+        // A non-conflict per-op failure the source reports (here every op rejected as Error, nothing applied) surfaces at
+        // the step (Apply, the immediate write), not at Commit, as ExternalWriteFailed (only a Conflict becomes
+        // ExternalVersionConflict), and a Revert leaves the source as it was.
         run(C.FailureTitle, async r =>
         {
             const id = r.Id(R.NewId);
-            const tx = await r.Stage([R.Create(id), R.Set(id, R.LabelMember, R.NewLabel)]);
+            const tx = await r.Begin();
             r.Recorder.FailNextApply = true;
-            await assert.rejects(tx.Commit(), (error: unknown) =>
+            await assert.rejects(r.Step(tx, [R.Create(id), R.Set(id, R.LabelMember, R.NewLabel)]), (error: unknown) =>
             {
                 assert.ok(error instanceof ExternalWriteError);
                 assert.equal(error.Code, EngineBridgeErrorCode.ExternalWriteFailed);
@@ -597,13 +629,14 @@ export class ExternalConnectorConformance
                 t.skip(C.SkipUnversioned);
                 return;
             }
-            // The seed row is present but unversioned, so the before-image version (null) fails closed at the source,
-            // and an adapter-reported Conflict on an Optimistic batch is an ExternalVersionConflict (R122).
+            // The seed row is present but unversioned, so the before-image version (null) fails closed at the source, and
+            // an adapter-reported Conflict on an Optimistic batch is an ExternalVersionConflict (R122). Under immediate
+            // writes that conflict surfaces at the step (Apply), not at Commit.
             const r = R.Open(adapter, { Concurrency: WriteConcurrency.Optimistic, VersionField: R.VersionField }, [], links, source);
             try
             {
-                const tx = await r.Stage([R.Set(r.Id(R.SeedId), R.LabelMember, R.UpdatedLabel)]);
-                await assert.rejects(tx.Commit(), (error: unknown) =>
+                const tx = await r.Begin();
+                await assert.rejects(r.Step(tx, [R.Set(r.Id(R.SeedId), R.LabelMember, R.UpdatedLabel)]), (error: unknown) =>
                 {
                     assert.ok(error instanceof ExternalVersionConflict);
                     assert.ok(!(error instanceof ExternalWriteError));
