@@ -16,7 +16,7 @@
     "mongodb": "^6.12.0"
   },
   "devDependencies": {
-    "@pragmatic-tech-ai/graph": "^0.5.0",
+    "@pragmatic-tech-ai/graph": "^0.6.0",
     "@types/node": "^22.20.1",
     "@types/pg": "^8.11.0",
     "pg-mem": "^3.0.0",
