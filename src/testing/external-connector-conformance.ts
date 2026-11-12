@@ -4,6 +4,7 @@ import {
     Compare,
     CompareOp,
     ConnectorChangeSet,
+    ConnectorContext,
     IdIn,
     In,
     IsNull,
@@ -288,6 +289,7 @@ export class ExternalConformanceRun
         {
             const request: IFetchRequest = {
                 Model: ExternalConformanceRun.Model, Concept: ExternalConformanceRun.Concept, Predicate: predicate,
+                Context: ConnectorContext.Anonymous,
                 Members: [ExternalConformanceRun.IdMember, ExternalConformanceRun.LabelMember], ...extra,
                 ...(resume === undefined ? {} : { Resume: resume }),
             };
@@ -323,7 +325,7 @@ export class ExternalConformanceRun
     /** Opens a transaction the case drives itself (so it holds the handle even when a step throws). */
     public Begin(): Promise<IConnectorTransaction>
     {
-        return this.Connector.Begin();
+        return this.Connector.Begin(ConnectorContext.Anonymous);
     }
 
     /** Executes `changes` on `tx` as one immediate write step: the step runs at the source now and reports its versions. */
