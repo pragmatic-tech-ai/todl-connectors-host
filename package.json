@@ -1,6 +1,7 @@
 {
   "name": "@pragmatic-tech-ai/pragmatic-connectors-host",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/pragmatic-tech-ai/todl-connectors-host.git"
@@ -17,11 +18,13 @@
     "test": "tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
-    "@pragmatic-tech-ai/todl": "^0.66.1",
-    "@pragmatic-tech-ai/todl-runtime": "^0.7.0",
     "pg": "^8.13.0",
     "neo4j-driver": "^5.27.0",
     "mongodb": "^6.12.0"
+  },
+  "peerDependencies": {
+    "@pragmatic-tech-ai/todl": "^0.66.2",
+    "@pragmatic-tech-ai/todl-runtime": "^0.7.0"
   },
   "devDependencies": {
     "@pragmatic-tech-ai/pragmatic-graph": "file:../pragmatic-graph",
