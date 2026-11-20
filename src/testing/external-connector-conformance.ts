@@ -21,7 +21,7 @@ import {
     type ISchemaDescription,
     type MemberInput,
     type Predicate,
-} from "@pragmatic-tech-ai/graph";
+} from "@pragmatic-tech-ai/pragmatic-graph";
 import {
     DataSourceKind,
     VersionBumpingAdapter,

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ServiceProvider } from "@pragmatic-tech-ai/todl-runtime";
-import { TruePredicate } from "@pragmatic-tech-ai/graph";
+import { TruePredicate } from "@pragmatic-tech-ai/pragmatic-graph";
 import type { ConnectorSpec } from "@pragmatic-tech-ai/todl";
 import { EngineBridgeError, EngineBridgeErrorCode } from "@pragmatic-tech-ai/todl/engine";
 import { E2eHarness } from "../testing/e2e-harness.js";

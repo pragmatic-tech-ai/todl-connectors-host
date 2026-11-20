@@ -1,5 +1,5 @@
 {
-  "name": "@pragmatic-tech-ai/adapter-pack-example",
+  "name": "@pragmatic-tech-ai/pragmatic-adapter-pack-example",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/pack.js",

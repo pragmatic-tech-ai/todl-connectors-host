@@ -16,7 +16,7 @@ import { WorkerThreadSandbox, WorkerThreadSandboxFactory } from "../worker-threa
 class SandboxFixture
 {
     private static readonly PackRelative = "../../../../fixtures/adapter-pack-example/dist/pack.js";
-    private static readonly PackName = "@pragmatic-tech-ai/adapter-pack-example";
+    private static readonly PackName = "@pragmatic-tech-ai/pragmatic-adapter-pack-example";
     private static readonly PackVersion = "0.1.0";
     private static readonly SqlKind = "sql";
     private static readonly TempPrefix = "bad-pack-";

@@ -5,7 +5,7 @@ import { Pool } from "pg";
 import { SqlAdapter, WriteAtomicity, WriteFailureKind } from "@pragmatic-tech-ai/todl";
 import type { IDataSourceAdapter } from "@pragmatic-tech-ai/todl";
 import { EngineBridgeErrorCode, ExternalWriteError } from "@pragmatic-tech-ai/todl/engine";
-import { MemberKind, ValueType } from "@pragmatic-tech-ai/graph";
+import { MemberKind, ValueType } from "@pragmatic-tech-ai/pragmatic-graph";
 import { PgSqlSession } from "../sql/pg-sql-session.js";
 import { DocumentAdapter } from "../document/document-adapter.js";
 import { RestAdapter } from "../rest/rest-adapter.js";

@@ -13,7 +13,7 @@ class IntegrationEnv
 {
     public static readonly GateVar = "PACK_INSTALLER_IT";
     public static readonly GateValue = "1";
-    public static readonly PackName = "@pragmatic-tech-ai/adapter-pack-example";
+    public static readonly PackName = "@pragmatic-tech-ai/pragmatic-adapter-pack-example";
     private static readonly Npm = "npm";
     private static readonly Utf8 = "utf8";
     private static readonly FixtureRelative = "../../../fixtures/adapter-pack-example";
